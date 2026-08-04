@@ -1,0 +1,9 @@
+[package]
+name = "rillet"
+version = "0.0.1"
+edition = "2024"
+repository = "https://github.com/mantle-team/rillet"
+readme = "README.md"
+description = "An actor framework with lock-free reads"
+license = "MIT OR Apache-2.0"
+
