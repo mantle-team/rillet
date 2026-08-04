@@ -1,0 +1,42 @@
+name: Tests and checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'merge_group' || !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: extractions/setup-just@v2
+      - uses: Swatinem/rust-cache@v2
+      - uses: baptiste0928/cargo-install@v3
+        with:
+          crate: cargo-semver-checks
+
+      - name: Format
+        run: just check-format
+      - name: Build
+        run: just build
+      - name: Lint
+        run: just check-lint
+      - name: Test
+        run: just test
+      - name: Package
+        run: just check-package
+      - name: Semver
+        run: just check-semver

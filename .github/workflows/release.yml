@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+run-name: Release rillet ${{ github.ref_name }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v2
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: just test
+
+      - name: Validate tag against Cargo.toml
+        run: just check-tag "${{ github.ref_name }}"
+
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        run: just publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
