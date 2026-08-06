@@ -637,12 +637,10 @@ fn generate_spawn_impl(
         metrics.inc_processed(cmd_idx);
     };
 
-    // Drains the remaining commands on shutdown, without metrics.
+    // Drains the remaining commands on shutdown.
     let cmd_drain = quote! {
         while let Ok(cmd) = cmd_rx.try_recv() {
-            let mut s = state.write().unwrap();
-            cmd.execute(&mut s);
-            s.__rillet_publish_view();
+            #cmd_process_with_metrics
         }
     };
 

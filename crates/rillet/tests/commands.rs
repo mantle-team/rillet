@@ -74,6 +74,52 @@ fn overfilling_a_sized_command_queue_panics() {
     }
 }
 
+#[rillet::service]
+pub struct Backlog {
+    #[rillet(get, default)]
+    done: u32,
+}
+
+#[rillet::handlers]
+impl Backlog {
+    #[rillet(command)]
+    fn stall(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    #[rillet(command)]
+    fn tick(&mut self) {
+        self.done += 1;
+    }
+}
+
+#[test]
+fn drained_commands_count_as_processed() {
+    let backlog = Backlog::new().spawn();
+
+    // Park the loop in a slow command, then cancel and queue a backlog
+    // for the shutdown drain. The token is taken up front: the handle's
+    // cancel() would block on the state lock the stall holds.
+    let token = backlog.cancel_token();
+    backlog.stall();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    for _ in 0..30 {
+        backlog.tick();
+    }
+    token.cancel();
+    backlog.task_completion().wait();
+
+    assert_eq!(backlog.done(), 30);
+    for stats in backlog.command_stats() {
+        assert_eq!(
+            stats.total_enqueued, stats.total_processed,
+            "{} left depth {}",
+            stats.name, stats.depth
+        );
+    }
+    assert_eq!(backlog.aggregate_stats().depth, 0);
+}
+
 #[test]
 fn commands_after_cancel_are_dropped_silently() {
     let ledger = Ledger::new("closed".into()).spawn();
