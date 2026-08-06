@@ -223,7 +223,7 @@ fn parse_struct_attrs(input: &DeriveInput) -> Result<Vec<Ident>> {
 fn inject_emitter_field(fields: &mut FieldsNamed) {
     let emitter_field: syn::Field = syn::parse_quote! {
         #[doc(hidden)]
-        pub __rillet_emitter: rillet::event::Emitter
+        __rillet_emitter: rillet::event::Emitter
     };
     fields.named.push(emitter_field);
 }
@@ -235,7 +235,7 @@ fn inject_emitter_field(fields: &mut FieldsNamed) {
 fn inject_view_slot_field(fields: &mut FieldsNamed, view_ty: &Type) {
     let view_field: syn::Field = syn::parse_quote! {
         #[doc(hidden)]
-        pub __rillet_view_slot: Option<rillet::view::ViewSlot<#view_ty>>
+        __rillet_view_slot: Option<rillet::view::ViewSlot<#view_ty>>
     };
     fields.named.push(view_field);
 }
@@ -244,7 +244,7 @@ fn inject_view_slot_field(fields: &mut FieldsNamed, view_ty: &Type) {
 fn inject_cancel_token_field(fields: &mut FieldsNamed) {
     let cancel_field: syn::Field = syn::parse_quote! {
         #[doc(hidden)]
-        pub __rillet_cancel_token: rillet::runtime::CancellationToken
+        __rillet_cancel_token: rillet::runtime::CancellationToken
     };
     fields.named.push(cancel_field);
 }
@@ -253,7 +253,7 @@ fn inject_cancel_token_field(fields: &mut FieldsNamed) {
 fn inject_join_handles_field(fields: &mut FieldsNamed) {
     let join_handles_field: syn::Field = syn::parse_quote! {
         #[doc(hidden)]
-        pub __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::Mutex<Vec<Box<dyn rillet::runtime::TaskHandle>>>>
+        __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::Mutex<Vec<Box<dyn rillet::runtime::TaskHandle>>>>
     };
     fields.named.push(join_handles_field);
 }
@@ -262,7 +262,7 @@ fn inject_join_handles_field(fields: &mut FieldsNamed) {
 fn inject_sampling_state_field(fields: &mut FieldsNamed) {
     let sampling_state_field: syn::Field = syn::parse_quote! {
         #[doc(hidden)]
-        pub __rillet_sampling_state: rillet::metrics::SamplingState
+        __rillet_sampling_state: rillet::metrics::SamplingState
     };
     fields.named.push(sampling_state_field);
 }
