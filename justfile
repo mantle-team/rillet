@@ -23,7 +23,7 @@ check-features:
     @echo "Checking feature combinations..."
     cargo test -p rillet --no-default-features
     cargo test -p rillet --no-default-features --features im
-    cargo test -p rillet --no-default-features --features smol_str
+    cargo test -p rillet --no-default-features --features smol-str
 
 # Check code formatting
 check-format:

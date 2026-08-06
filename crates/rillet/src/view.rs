@@ -16,7 +16,7 @@ use event_listener::Event;
 
 #[cfg(feature = "im")]
 pub use im;
-#[cfg(feature = "smol_str")]
+#[cfg(feature = "smol-str")]
 pub use smol_str::SmolStr;
 
 /// Marker for types that clone by copying pointers, bumping reference
@@ -69,7 +69,7 @@ impl_cheap_clone_tuple!(A, B);
 impl_cheap_clone_tuple!(A, B, C);
 impl_cheap_clone_tuple!(A, B, C, D);
 
-#[cfg(feature = "smol_str")]
+#[cfg(feature = "smol-str")]
 impl CheapClone for SmolStr {}
 
 #[cfg(feature = "im")]

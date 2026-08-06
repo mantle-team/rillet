@@ -8,13 +8,13 @@ readme = "../../README.md"
 description = "An actor framework with lock-free reads"
 
 [features]
-default = ["im", "smol_str"]
+default = ["im", "smol-str"]
 im = ["dep:im"]
-smol_str = ["dep:smol_str"]
+smol-str = ["dep:smol_str"]
 
 [[test]]
 name = "blessed_types"
-required-features = ["im", "smol_str"]
+required-features = ["im", "smol-str"]
 
 [dependencies]
 rillet-macros = { path = "../rillet-macros", version = "0.0.1" }
