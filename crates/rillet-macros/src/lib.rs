@@ -3,6 +3,7 @@
 use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 
+mod case;
 mod cheap_clone;
 mod event;
 mod handlers;

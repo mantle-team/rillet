@@ -8,6 +8,8 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+
+use crate::case::to_snake_case;
 use syn::{
     Data, DeriveInput, Error, Expr, Field, Fields, FieldsNamed, Ident, Result, Type, parse::Parser,
     parse2,
@@ -655,21 +657,6 @@ fn generate_view_impls(
             #(#subscription_delegations)*
         }
     }
-}
-
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-        } else {
-            result.push(c);
-        }
-    }
-    result
 }
 
 /// Generate cancel(), task_completion(), and cancel_token() methods on the handle.

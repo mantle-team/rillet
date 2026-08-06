@@ -13,6 +13,8 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+
+use crate::case::{to_pascal_case, to_snake_case};
 use syn::{Error, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, Result, Type, parse2};
 
 /// A parsed command method.
@@ -293,33 +295,6 @@ fn extract_all_params(
 fn strip_rillet_attrs(mut method: ImplItemFn) -> ImplItemFn {
     method.attrs.retain(|attr| !attr.path().is_ident("rillet"));
     method
-}
-
-fn to_pascal_case(s: &str) -> String {
-    s.split('_')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().chain(chars).collect(),
-                None => String::new(),
-            }
-        })
-        .collect()
-}
-
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-        } else {
-            result.push(c);
-        }
-    }
-    result
 }
 
 /// Derives the subscription method name from the event type, MessageSent
