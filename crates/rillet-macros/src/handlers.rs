@@ -646,79 +646,103 @@ fn generate_spawn_impl(
         }
     };
 
-    let loop_body = if has_commands && has_events {
+    // recv on a closed channel returns Err on every poll, so once the
+    // channel closes the loop polls a pending future in its place.
+    let cmd_recv_setup = quote! {
+        let cmd_closed = !cmd_open;
+        let mut cmd_fut = std::pin::pin!(
+            async {
+                if cmd_closed {
+                    std::future::pending().await
+                } else {
+                    cmd_rx.recv().await
+                }
+            }
+            .fuse()
+        );
+    };
+
+    let service_loop = if has_commands && has_events {
         quote! {
-            use rillet::runtime::FutureExt;
+            let state = state_clone;
+            let mut cmd_rx = cmd_rx;
+            let mut cmd_open = true;
+            loop {
+                use rillet::runtime::FutureExt;
 
-            #(#event_fut_setup)*
+                #(#event_fut_setup)*
 
-            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
-            let mut cmd_fut = std::pin::pin!(cmd_rx.recv().fuse());
+                let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+                #cmd_recv_setup
 
-            rillet::runtime::futures::select! {
-                _ = cancel_fut => {
-                    // Drain remaining commands before exit
-                    #cmd_drain
-                    break;
-                }
-                result = cmd_fut => {
-                    match result {
-                        Ok(cmd) => {
-                            #cmd_process_with_metrics
-                        }
-                        Err(_) => break, // Channel closed
+                rillet::runtime::futures::select! {
+                    _ = cancel_fut => {
+                        // Drain remaining commands before exit
+                        #cmd_drain
+                        break;
                     }
+                    result = cmd_fut => {
+                        match result {
+                            Ok(cmd) => {
+                                #cmd_process_with_metrics
+                            }
+                            Err(_) => cmd_open = false,
+                        }
+                    }
+                    #(#event_select_arms)*
                 }
-                #(#event_select_arms)*
             }
         }
     } else if has_commands {
         quote! {
-            use rillet::runtime::FutureExt;
+            let state = state_clone;
+            let mut cmd_rx = cmd_rx;
+            let mut cmd_open = true;
+            loop {
+                use rillet::runtime::FutureExt;
 
-            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
-            let mut cmd_fut = std::pin::pin!(cmd_rx.recv().fuse());
+                let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+                #cmd_recv_setup
 
-            rillet::runtime::futures::select! {
-                _ = cancel_fut => {
-                    // Drain remaining commands before exit
-                    #cmd_drain
-                    break;
-                }
-                result = cmd_fut => {
-                    match result {
-                        Ok(cmd) => {
-                            #cmd_process_with_metrics
+                rillet::runtime::futures::select! {
+                    _ = cancel_fut => {
+                        // Drain remaining commands before exit
+                        #cmd_drain
+                        break;
+                    }
+                    result = cmd_fut => {
+                        match result {
+                            Ok(cmd) => {
+                                #cmd_process_with_metrics
+                            }
+                            Err(_) => cmd_open = false,
                         }
-                        Err(_) => break, // Channel closed
                     }
                 }
             }
         }
     } else if has_events {
         quote! {
-            use rillet::runtime::FutureExt;
+            let state = state_clone;
+            let _cmd_rx = cmd_rx;
+            loop {
+                use rillet::runtime::FutureExt;
 
-            #(#event_fut_setup)*
+                #(#event_fut_setup)*
 
-            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+                let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
 
-            rillet::runtime::futures::select! {
-                _ = cancel_fut => break,
-                #(#event_select_arms)*
+                rillet::runtime::futures::select! {
+                    _ = cancel_fut => break,
+                    #(#event_select_arms)*
+                }
             }
         }
     } else {
         quote! {
-            use rillet::runtime::FutureExt;
-
-            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
-            let mut sleep_fut = std::pin::pin!(rillet::runtime::Timer::after(std::time::Duration::from_secs(1)).fuse());
-
-            rillet::runtime::futures::select! {
-                _ = cancel_fut => break,
-                _ = sleep_fut => {}
-            }
+            let _state = state_clone;
+            let _cmd_rx = cmd_rx;
+            cancel_token.cancelled().await;
         }
     };
 
@@ -732,7 +756,7 @@ fn generate_spawn_impl(
             cmd_count,
             tasks,
             &event_receiver_setup,
-            &loop_body,
+            &service_loop,
         )
     } else {
         generate_spawn_simple(
@@ -742,7 +766,7 @@ fn generate_spawn_impl(
             cmd_count,
             tasks,
             &event_receiver_setup,
-            &loop_body,
+            &service_loop,
         )
     }
 }
@@ -755,7 +779,7 @@ fn generate_spawn_simple(
     cmd_count: usize,
     tasks: &[TaskMethod],
     event_receiver_setup: &[TokenStream],
-    loop_body: &TokenStream,
+    service_loop: &TokenStream,
 ) -> TokenStream {
     let task_spawns: Vec<TokenStream> = tasks
         .iter()
@@ -778,12 +802,16 @@ fn generate_spawn_simple(
         impl #struct_name {
             /// Spawns this service on the default [`SmolSpawner`](rillet::SmolSpawner)
             /// and returns its handle.
+            ///
+            /// The service runs until cancelled.
             pub fn spawn(self) -> #handle_name {
                 self.spawn_with(rillet::runtime::SmolSpawner)
             }
 
             /// Spawns this service on the given spawner and returns its
             /// handle.
+            ///
+            /// The service runs until cancelled.
             pub fn spawn_with<__S: rillet::runtime::Spawner>(mut self, spawner: __S) -> #handle_name {
                 let (cmd_tx, cmd_rx) = rillet::runtime::mpsc::bounded::<#command_enum_name>(#struct_name::__RILLET_COMMAND_CAPACITY);
 
@@ -808,11 +836,7 @@ fn generate_spawn_simple(
                     let cancel_token = cancel_token.clone();
                     let metrics = metrics.clone();
                     let main_loop_handle = spawner.spawn(async move {
-                        let state = state_clone;
-                        let mut cmd_rx = cmd_rx;
-                        loop {
-                            #loop_body
-                        }
+                        #service_loop
                     });
                     join_handles.lock().unwrap().push(Box::new(main_loop_handle));
                 }
@@ -840,7 +864,7 @@ fn generate_spawn_with_builder(
     cmd_count: usize,
     tasks: &[TaskMethod],
     event_receiver_setup: &[TokenStream],
-    loop_body: &TokenStream,
+    service_loop: &TokenStream,
 ) -> TokenStream {
     let builder_name = format_ident!("__{struct_name}Builder");
 
@@ -988,11 +1012,7 @@ fn generate_spawn_with_builder(
                     let cancel_token = cancel_token.clone();
                     let metrics = metrics.clone();
                     let main_loop_handle = spawner.spawn(async move {
-                        let state = state_clone;
-                        let mut cmd_rx = cmd_rx;
-                        loop {
-                            #loop_body
-                        }
+                        #service_loop
                     });
                     join_handles.lock().unwrap().push(Box::new(main_loop_handle));
                 }
@@ -1016,12 +1036,16 @@ fn generate_spawn_with_builder(
 
             /// Spawns this service on the default [`SmolSpawner`](rillet::SmolSpawner)
             /// and returns its handle.
+            ///
+            /// The service runs until cancelled.
             pub fn spawn(self) -> #handle_name {
                 self.spawn_with(rillet::runtime::SmolSpawner)
             }
 
             /// Spawns this service on the given spawner and returns its
             /// handle.
+            ///
+            /// The service runs until cancelled.
             pub fn spawn_with<__S: rillet::runtime::Spawner>(self, spawner: __S) -> #handle_name {
                 let cancel_token = self.inner.__rillet_cancel_token.clone();
                 let (handle, join_handles) = self.inner.__rillet_spawn_core_with(&spawner);

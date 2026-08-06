@@ -78,6 +78,37 @@ fn service_to_service_subscription_runs_handlers() {
     bird.cancel();
 }
 
+#[rillet::service]
+#[rillet(emits = [Chirp])]
+pub struct Parrot {
+    bird: BirdHandle,
+}
+
+#[rillet::handlers]
+impl Parrot {
+    #[rillet(command)]
+    fn preen(&mut self) {}
+
+    #[rillet(from = bird)]
+    fn on_chirp(&mut self, event: Chirp) {
+        self.emit_chirp(event);
+    }
+}
+
+#[test]
+fn services_outlive_their_handles() {
+    let bird = Bird::new().spawn();
+    let parrot = Parrot::new(bird.clone()).spawn();
+    let mut echoes = parrot.on_chirp();
+
+    parrot.preen();
+    drop(parrot);
+    bird.chirp(6);
+
+    assert_eq!(echoes.recv().map(|c| c.loudness), Some(6));
+    bird.cancel();
+}
+
 #[rillet::service(event_capacity = 2)]
 #[rillet(emits = [Chirp])]
 pub struct QuietBird {}

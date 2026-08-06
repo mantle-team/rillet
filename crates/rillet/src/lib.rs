@@ -5,6 +5,8 @@
 //! over broadcast channels, and a service may publish a [view](crate::view):
 //! an immutable snapshot of its state that readers load without taking any
 //! lock.
+//!
+//! A service runs until cancelled.
 
 mod cancellation;
 mod spawner;
