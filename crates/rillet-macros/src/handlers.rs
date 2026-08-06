@@ -244,6 +244,11 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
                 meta.input.parse::<syn::Token![=]>()?;
                 let field: Ident = meta.input.parse()?;
                 attrs.watch_field = Some(field);
+            } else {
+                return Err(meta.error(
+                    "unknown rillet attribute; expected `command`, `direct`, `direct_mut`, \
+                     `task`, `from = <field>`, or `watch = <field>`",
+                ));
             }
             Ok(())
         })?;

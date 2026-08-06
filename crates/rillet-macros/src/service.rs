@@ -44,17 +44,24 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
     // Getters, defaults, and constructor fields come from the user's
     // declaration, so they are collected before hidden fields are injected.
-    let getters: Vec<GetterField> = fields
-        .named
-        .iter()
-        .filter_map(|f| GetterField::from_field(f).transpose())
-        .collect::<Result<_>>()?;
-
-    let defaults: Vec<DefaultField> = fields
-        .named
-        .iter()
-        .filter_map(|f| DefaultField::from_field(f).transpose())
-        .collect::<Result<_>>()?;
+    let mut getters: Vec<GetterField> = Vec::new();
+    let mut defaults: Vec<DefaultField> = Vec::new();
+    for field in fields.named.iter() {
+        let name = field
+            .ident
+            .clone()
+            .expect("fields of a named-fields struct have idents");
+        let attrs = parse_field_attrs(field)?;
+        if attrs.get {
+            getters.push(GetterField {
+                name: name.clone(),
+                ty: field.ty.clone(),
+            });
+        }
+        if let Some(default_expr) = attrs.default {
+            defaults.push(DefaultField { name, default_expr });
+        }
+    }
 
     let user_fields: Vec<_> = fields
         .named
@@ -211,8 +218,10 @@ fn parse_struct_attrs(input: &DeriveInput) -> Result<Vec<Ident>> {
                     }
                     content.parse::<syn::Token![,]>()?;
                 }
+                Ok(())
+            } else {
+                Err(meta.error("unknown rillet attribute; expected `emits = [Event, ...]`"))
             }
-            Ok(())
         })?;
     }
 
@@ -276,103 +285,49 @@ struct GetterField {
     ty: Type,
 }
 
-impl GetterField {
-    fn from_field(field: &Field) -> Result<Option<Self>> {
-        let name = field
-            .ident
-            .clone()
-            .expect("we already verified these are named fields");
-
-        // Skip injected rillet fields
-        if name.to_string().starts_with("__rillet_") {
-            return Ok(None);
-        }
-
-        for attr in &field.attrs {
-            if !attr.path().is_ident("rillet") {
-                continue;
-            }
-
-            let mut is_getter = false;
-
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("get") {
-                    is_getter = true;
-                } else if meta.input.peek(syn::Token![=]) {
-                    // Skip over unknown metas with = value
-                    let _: syn::Expr = meta.value()?.parse()?;
-                } else if meta.input.peek(syn::token::Paren) {
-                    // Skip over unknown metas with (...)
-                    let _content;
-                    syn::parenthesized!(_content in meta.input);
-                }
-                // A bare path like #[rillet(something)] needs no skipping.
-                Ok(())
-            })?;
-
-            if is_getter {
-                return Ok(Some(Self {
-                    name,
-                    ty: field.ty.clone(),
-                }));
-            }
-        }
-
-        Ok(None)
-    }
-}
-
 struct DefaultField {
     name: Ident,
-    #[allow(dead_code)]
-    ty: Type,
     default_expr: Option<Expr>,
 }
 
-impl DefaultField {
-    fn from_field(field: &Field) -> Result<Option<Self>> {
-        let name = field
-            .ident
-            .clone()
-            .expect("we already verified these are named fields");
+struct FieldAttrs {
+    get: bool,
+    /// `Some(None)` for bare `default`, `Some(Some(expr))` for `default = expr`.
+    default: Option<Option<Expr>>,
+}
 
-        // Skip injected rillet fields
-        if name.to_string().starts_with("__rillet_") {
-            return Ok(None);
+fn parse_field_attrs(field: &Field) -> Result<FieldAttrs> {
+    let mut attrs = FieldAttrs {
+        get: false,
+        default: None,
+    };
+
+    for attr in &field.attrs {
+        if !attr.path().is_ident("rillet") {
+            continue;
         }
 
-        for attr in &field.attrs {
-            if !attr.path().is_ident("rillet") {
-                continue;
-            }
-
-            let mut default_expr: Option<Option<Expr>> = None;
-
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("default") {
-                    if meta.input.peek(syn::Token![=]) {
-                        let value = meta.value()?;
-                        let expr: Expr = value.parse()?;
-                        default_expr = Some(Some(expr));
-                    } else {
-                        // Bare #[rillet(default)] uses Default::default().
-                        default_expr = Some(None);
-                    }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("get") {
+                attrs.get = true;
+                Ok(())
+            } else if meta.path.is_ident("default") {
+                if meta.input.peek(syn::Token![=]) {
+                    attrs.default = Some(Some(meta.value()?.parse()?));
+                } else {
+                    // Bare #[rillet(default)] uses Default::default().
+                    attrs.default = Some(None);
                 }
                 Ok(())
-            })?;
-
-            if let Some(expr) = default_expr {
-                return Ok(Some(Self {
-                    name,
-                    ty: field.ty.clone(),
-                    default_expr: expr,
-                }));
+            } else {
+                Err(meta.error(
+                    "unknown rillet attribute; expected `get`, `default`, or `default = <expr>`",
+                ))
             }
-        }
-
-        Ok(None)
+        })?;
     }
+
+    Ok(attrs)
 }
 
 // ============================================================================
