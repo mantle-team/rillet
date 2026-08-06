@@ -65,18 +65,24 @@ fn mutation_publishes_a_coherent_view() {
 #[test]
 fn unchanged_view_is_not_republished() {
     let counter = Counter::new().spawn();
+
+    counter.set(5);
+    wait_for("first set to process", || counter.view().value == 5);
+    let before = counter.view();
+
+    // A republish of an unchanged view would store a fresh Arc; the
+    // processed counter proves the duplicate set fully executed.
+    counter.set(5);
+    wait_for("second set to process", || {
+        counter.aggregate_stats().total_processed == 2
+    });
+    assert!(Arc::ptr_eq(&before, &counter.view()));
+
+    // Later publishes still arrive.
     let mut watch = counter.watch_view();
-
-    counter.set(5);
-    let first = wait_on("first publish", watch.changed());
-    assert_eq!(first.value, 5);
-
-    // Setting the same value mutates nothing observable; the follow-up set
-    // proves nothing was published in between.
-    counter.set(5);
     counter.set(6);
-    let second = wait_on("second publish", watch.changed());
-    assert_eq!(second.value, 6);
+    let next = wait_on("changed publish", watch.changed());
+    assert_eq!(next.value, 6);
     counter.cancel();
 }
 
