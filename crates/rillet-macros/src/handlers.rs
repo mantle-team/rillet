@@ -764,7 +764,7 @@ fn generate_spawn_simple(
             quote! {
                 {
                     let handle = handle.clone();
-                    let cancel_token = cancel_token.child_token();
+                    let cancel_token = cancel_token.clone();
                     let task_handle = spawner.spawn(async move {
                         #struct_name::#method_name(handle, cancel_token).await;
                     });
@@ -924,7 +924,7 @@ fn generate_spawn_with_builder(
                 quote! {
                     {
                         let handle = handle.clone();
-                        let cancel_token = cancel_token.child_token();
+                        let cancel_token = cancel_token.clone();
                         let task_handle = spawner.spawn(async move {
                             #struct_name::#method_name(handle, cancel_token).await;
                         });
@@ -944,7 +944,7 @@ fn generate_spawn_with_builder(
                 quote! {
                     if let Some((#(#param_names,)*)) = self.#field_name {
                         let handle = handle.clone();
-                        let cancel_token = cancel_token.child_token();
+                        let cancel_token = cancel_token.clone();
                         let task_handle = spawner.spawn(async move {
                             #struct_name::#method_name(handle, cancel_token, #(#param_names),*).await;
                         });

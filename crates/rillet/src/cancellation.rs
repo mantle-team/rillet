@@ -55,11 +55,6 @@ impl CancellationToken {
             listener: None,
         }
     }
-
-    /// Returns a clone of this token; cancelling either cancels both.
-    pub fn child_token(&self) -> Self {
-        self.clone()
-    }
 }
 
 impl Default for CancellationToken {
