@@ -1,7 +1,7 @@
 mod support;
 
 use rillet::Event;
-use support::wait_for;
+use support::{wait_for, wait_on};
 
 #[derive(Clone, Event)]
 pub struct Chirp {
@@ -48,8 +48,14 @@ fn external_subscribers_receive_events() {
     bird.chirp(3);
     bird.chirp(4);
 
-    assert_eq!(chirps.recv().map(|c| c.loudness), Some(3));
-    assert_eq!(chirps.recv().map(|c| c.loudness), Some(4));
+    assert_eq!(
+        wait_on("first chirp", chirps.next()).map(|c| c.loudness),
+        Some(3)
+    );
+    assert_eq!(
+        wait_on("second chirp", chirps.next()).map(|c| c.loudness),
+        Some(4)
+    );
     bird.cancel();
 }
 
@@ -61,7 +67,10 @@ fn subscribers_only_see_events_after_subscribing() {
 
     let mut chirps = bird.on_chirp();
     bird.chirp(2);
-    assert_eq!(chirps.recv().map(|c| c.loudness), Some(2));
+    assert_eq!(
+        wait_on("late chirp", chirps.next()).map(|c| c.loudness),
+        Some(2)
+    );
     bird.cancel();
 }
 
@@ -105,7 +114,10 @@ fn services_outlive_their_handles() {
     drop(parrot);
     bird.chirp(6);
 
-    assert_eq!(echoes.recv().map(|c| c.loudness), Some(6));
+    assert_eq!(
+        wait_on("echoed chirp", echoes.next()).map(|c| c.loudness),
+        Some(6)
+    );
     bird.cancel();
 }
 
