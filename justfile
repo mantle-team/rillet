@@ -4,13 +4,13 @@
 default:
     @just --list
 
-# Build the library
+# Build the workspace
 build:
-    cargo build
+    cargo build --workspace
 
 # Run tests
 test:
-    cargo test
+    cargo test --workspace
 
 # Run all checks (build, lint, format, tests, features, package, semver)
 check: build check-lint check-format test check-features check-package check-semver
@@ -28,12 +28,12 @@ check-features:
 # Check code formatting
 check-format:
     @echo "Checking format..."
-    cargo fmt -- --check
+    cargo fmt --all -- --check
 
 # Check clippy lints
 check-lint:
     @echo "Running clippy..."
-    cargo clippy -- -D warnings
+    cargo clippy --workspace -- -D warnings
 
 # Check tag validity
 check-tag tag:
