@@ -75,6 +75,32 @@ fn cancellation_stops_tasks_and_completion_observes_it() {
 }
 
 #[test]
+fn join_waits_on_all_completions() {
+    let first = Beater::new().spawn();
+    let second = Beater::new().spawn();
+    wait_for("both tasks to start", || {
+        first.beats() >= 1 && second.beats() >= 1
+    });
+
+    rillet::runtime::TaskCompletion::join([first.cancel(), second.cancel()]).wait();
+
+    let stopped = (first.beats(), second.beats());
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!((first.beats(), second.beats()), stopped);
+}
+
+#[test]
+fn completion_reports_completeness_after_wait() {
+    let beater = Beater::new().spawn();
+    let completion = beater.task_completion();
+    assert!(!completion.is_complete());
+
+    beater.cancel();
+    completion.wait();
+    assert!(completion.is_complete());
+}
+
+#[test]
 fn context_tasks_receive_their_arguments() {
     let loader = Loader::new().spawn_feed(vec![1, 2, 3]).spawn();
     wait_for("feed task to deliver items", || loader.items().len() == 3);
