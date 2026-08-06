@@ -81,10 +81,7 @@ fn main() {
     println!("loaded: {:?}", loader.items());
 
     // Cancel, then wait for the task and the service loop to finish.
-    heart
-        .cancel()
-        .wait_timeout(Duration::from_secs(1))
-        .expect("tasks stop after cancellation");
+    heart.cancel().wait();
 
     // Confirm no beats arrive after cancellation.
     let after = heart.beats();

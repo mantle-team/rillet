@@ -77,10 +77,7 @@ fn overfilling_a_sized_command_queue_panics() {
 #[test]
 fn commands_after_cancel_are_dropped_silently() {
     let ledger = Ledger::new("closed".into()).spawn();
-    ledger
-        .cancel()
-        .wait_timeout(std::time::Duration::from_secs(1))
-        .expect("service should stop");
+    ledger.cancel().wait();
     // The channel is closed; sending must neither panic nor deliver.
     ledger.record(1);
     assert_eq!(ledger.entries().len(), 0);

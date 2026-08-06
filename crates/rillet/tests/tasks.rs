@@ -67,10 +67,7 @@ fn cancellation_stops_tasks_and_completion_observes_it() {
     let beater = Beater::new().spawn();
     wait_for("task to start", || beater.beats() >= 1);
 
-    beater
-        .cancel()
-        .wait_timeout(Duration::from_secs(1))
-        .expect("task should stop after cancellation");
+    beater.cancel().wait();
 
     let stopped_at = beater.beats();
     std::thread::sleep(Duration::from_millis(30));

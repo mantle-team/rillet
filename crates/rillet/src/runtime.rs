@@ -9,9 +9,6 @@ pub use futures;
 pub use futures::FutureExt;
 pub use std::sync::{Arc, Mutex, RwLock};
 
-use std::fmt;
-use std::time::Duration;
-
 /// Send a command from a generated handle method.
 ///
 /// Panics when the queue is full; a send after the service has shut down
@@ -40,44 +37,12 @@ impl TaskCompletion {
 
     /// Blocks until all tasks complete.
     ///
-    /// Task panics propagate directly to this call.
-    pub fn wait(&self) -> Result<(), TaskPanicked> {
+    /// A task panic propagates directly to this call.
+    pub fn wait(&self) {
         let handles: Vec<_> = self.handles.lock().unwrap().drain(..).collect();
         for handle in handles {
             handle.block_on();
         }
-
-        Ok(())
-    }
-
-    /// Blocks until all tasks complete or the timeout expires.
-    ///
-    /// Task panics propagate directly to this call.
-    pub fn wait_timeout(&self, duration: Duration) -> Result<(), WaitError> {
-        use futures_lite::future;
-
-        future::block_on(async {
-            let wait_future = async {
-                let handles: Vec<_> = self.handles.lock().unwrap().drain(..).collect();
-                for handle in handles {
-                    handle.block_on();
-                }
-            };
-
-            let timeout_future = Timer::after(duration);
-
-            futures_lite::future::or(
-                async {
-                    wait_future.await;
-                    Ok(())
-                },
-                async {
-                    timeout_future.await;
-                    Err(WaitError::Timeout)
-                },
-            )
-            .await
-        })
     }
 
     /// Returns true when no task handles remain to wait on.
@@ -98,41 +63,6 @@ impl TaskCompletion {
         Self { handles: combined }
     }
 }
-
-/// Error returned when one or more tasks panicked.
-#[derive(Debug)]
-pub struct TaskPanicked {
-    /// Panic messages from failed tasks.
-    pub panics: Vec<String>,
-}
-
-impl fmt::Display for TaskPanicked {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} task(s) panicked", self.panics.len())
-    }
-}
-
-impl std::error::Error for TaskPanicked {}
-
-/// Error returned from `wait_timeout`.
-#[derive(Debug)]
-pub enum WaitError {
-    /// The timeout expired before all tasks completed.
-    Timeout,
-    /// One or more tasks panicked.
-    Panicked(TaskPanicked),
-}
-
-impl fmt::Display for WaitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WaitError::Timeout => write!(f, "timeout waiting for tasks"),
-            WaitError::Panicked(p) => write!(f, "{}", p),
-        }
-    }
-}
-
-impl std::error::Error for WaitError {}
 
 #[cfg(test)]
 mod tests {
