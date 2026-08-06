@@ -12,11 +12,18 @@ build:
 test:
     cargo test
 
-# Run all checks (build, lint, format, tests, package, semver)
-check: build check-lint check-format test check-package check-semver
+# Run all checks (build, lint, format, tests, features, package, semver)
+check: build check-lint check-format test check-features check-package check-semver
 
 # Run quick checks (build, lint, format)
 check-quick: build check-lint check-format
+
+# Check every feature combination
+check-features:
+    @echo "Checking feature combinations..."
+    cargo test -p rillet --no-default-features
+    cargo test -p rillet --no-default-features --features im
+    cargo test -p rillet --no-default-features --features smol_str
 
 # Check code formatting
 check-format:
