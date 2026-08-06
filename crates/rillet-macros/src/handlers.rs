@@ -749,48 +749,21 @@ fn generate_spawn_impl(
     }
 }
 
-/// Generate the plain spawn methods, used when every task is handle-only.
-fn generate_spawn_simple(
+/// Generate the `__rillet_spawn_core_with` method both spawn paths call:
+/// it spawns the service loop and returns the handle and the shared task
+/// handles.
+fn generate_spawn_core(
     struct_name: &Ident,
     handle_name: &Ident,
     command_enum_name: &Ident,
     cmd_count: usize,
-    tasks: &[TaskMethod],
     event_receiver_setup: &[TokenStream],
     service_loop: &TokenStream,
 ) -> TokenStream {
-    let task_spawns: Vec<TokenStream> = tasks
-        .iter()
-        .map(|task| {
-            let method_name = &task.method_name;
-            quote! {
-                {
-                    let handle = handle.clone();
-                    let cancel_token = cancel_token.clone();
-                    let task_handle = spawner.spawn(async move {
-                        #struct_name::#method_name(handle, cancel_token).await;
-                    });
-                    join_handles.lock().unwrap().push(Box::new(task_handle));
-                }
-            }
-        })
-        .collect();
-
     quote! {
         impl #struct_name {
-            /// Spawns this service on the default [`SmolSpawner`](rillet::SmolSpawner)
-            /// and returns its handle.
-            ///
-            /// The service runs until cancelled.
-            pub fn spawn(self) -> #handle_name {
-                self.spawn_with(rillet::runtime::SmolSpawner)
-            }
-
-            /// Spawns this service on the given spawner and returns its
-            /// handle.
-            ///
-            /// The service runs until cancelled.
-            pub fn spawn_with<__S: rillet::runtime::Spawner>(mut self, spawner: __S) -> #handle_name {
+            /// Spawns the service loop; the caller spawns the tasks.
+            fn __rillet_spawn_core_with<__S: rillet::runtime::Spawner>(mut self, spawner: &__S) -> (#handle_name, rillet::runtime::Arc<rillet::runtime::Mutex<Vec<Box<dyn rillet::runtime::TaskHandle>>>>) {
                 let (cmd_tx, cmd_rx) = rillet::runtime::mpsc::bounded::<#command_enum_name>(#struct_name::__RILLET_COMMAND_CAPACITY);
 
                 let metrics = rillet::runtime::Arc::new(
@@ -818,12 +791,88 @@ fn generate_spawn_simple(
                     join_handles.lock().unwrap().push(Box::new(main_loop_handle));
                 }
 
-                let handle = #handle_name {
-                    state,
-                    cmd_tx,
-                    metrics,
-                    __rillet_view,
-                };
+                (
+                    #handle_name {
+                        state,
+                        cmd_tx,
+                        metrics,
+                        __rillet_view,
+                    },
+                    join_handles,
+                )
+            }
+        }
+    }
+}
+
+/// Generate the spawn of one handle-only task.
+fn generate_handle_task_spawn(struct_name: &Ident, method_name: &Ident) -> TokenStream {
+    quote! {
+        {
+            let handle = handle.clone();
+            let cancel_token = cancel_token.clone();
+            let task_handle = spawner.spawn(async move {
+                #struct_name::#method_name(handle, cancel_token).await;
+            });
+            join_handles.lock().unwrap().push(Box::new(task_handle));
+        }
+    }
+}
+
+/// Generate the plain spawn methods, used when every task is handle-only.
+fn generate_spawn_simple(
+    struct_name: &Ident,
+    handle_name: &Ident,
+    command_enum_name: &Ident,
+    cmd_count: usize,
+    tasks: &[TaskMethod],
+    event_receiver_setup: &[TokenStream],
+    service_loop: &TokenStream,
+) -> TokenStream {
+    let spawn_core = generate_spawn_core(
+        struct_name,
+        handle_name,
+        command_enum_name,
+        cmd_count,
+        event_receiver_setup,
+        service_loop,
+    );
+
+    let task_spawns: Vec<TokenStream> = tasks
+        .iter()
+        .map(|task| generate_handle_task_spawn(struct_name, &task.method_name))
+        .collect();
+
+    // Without tasks, the token and handle bindings would be unused.
+    let task_setup = if tasks.is_empty() {
+        quote! {
+            let (handle, _) = self.__rillet_spawn_core_with(&spawner);
+        }
+    } else {
+        quote! {
+            let cancel_token = self.__rillet_cancel_token.clone();
+            let (handle, join_handles) = self.__rillet_spawn_core_with(&spawner);
+        }
+    };
+
+    quote! {
+        #spawn_core
+
+        impl #struct_name {
+            /// Spawns this service on the default [`SmolSpawner`](rillet::SmolSpawner)
+            /// and returns its handle.
+            ///
+            /// The service runs until cancelled.
+            pub fn spawn(self) -> #handle_name {
+                self.spawn_with(rillet::runtime::SmolSpawner)
+            }
+
+            /// Spawns this service on the given spawner and returns its
+            /// handle.
+            ///
+            /// The service runs until cancelled.
+            pub fn spawn_with<__S: rillet::runtime::Spawner>(self, spawner: __S) -> #handle_name {
+                #task_setup
 
                 #(#task_spawns)*
 
@@ -922,16 +971,7 @@ fn generate_spawn_with_builder(
         .map(|task| {
             let method_name = &task.method_name;
             if task.extra_params.is_empty() {
-                quote! {
-                    {
-                        let handle = handle.clone();
-                        let cancel_token = cancel_token.clone();
-                        let task_handle = spawner.spawn(async move {
-                            #struct_name::#method_name(handle, cancel_token).await;
-                        });
-                        join_handles.lock().unwrap().push(Box::new(task_handle));
-                    }
-                }
+                generate_handle_task_spawn(struct_name, method_name)
             } else {
                 // A context task takes its parameters from the builder.
                 let field_name = format_ident!("{}_ctx", task.method_name);
@@ -956,6 +996,15 @@ fn generate_spawn_with_builder(
         })
         .collect();
 
+    let spawn_core = generate_spawn_core(
+        struct_name,
+        handle_name,
+        command_enum_name,
+        cmd_count,
+        event_receiver_setup,
+        service_loop,
+    );
+
     quote! {
         #[doc(hidden)]
         pub struct #builder_name {
@@ -963,47 +1012,9 @@ fn generate_spawn_with_builder(
             #(#builder_fields,)*
         }
 
+        #spawn_core
+
         impl #struct_name {
-            /// Spawns the service loop; the builder spawns the tasks.
-            fn __rillet_spawn_core_with<__S: rillet::runtime::Spawner>(mut self, spawner: &__S) -> (#handle_name, rillet::runtime::Arc<rillet::runtime::Mutex<Vec<Box<dyn rillet::runtime::TaskHandle>>>>) {
-                let (cmd_tx, cmd_rx) = rillet::runtime::mpsc::bounded::<#command_enum_name>(#struct_name::__RILLET_COMMAND_CAPACITY);
-
-                let metrics = rillet::runtime::Arc::new(
-                    rillet::metrics::CommandMetrics::<#cmd_count>::new()
-                );
-
-                self.__rillet_seed_view();
-                let __rillet_view = self.__rillet_view_slot_any();
-
-                #(#event_receiver_setup)*
-
-                let cancel_token = self.__rillet_cancel_token.clone();
-                let join_handles = self.__rillet_join_handles.clone();
-
-                let state = rillet::runtime::Arc::new(rillet::runtime::RwLock::new(self));
-                let state_clone = state.clone();
-
-                {
-                    let join_handles = join_handles.clone();
-                    let cancel_token = cancel_token.clone();
-                    let metrics = metrics.clone();
-                    let main_loop_handle = spawner.spawn(async move {
-                        #service_loop
-                    });
-                    join_handles.lock().unwrap().push(Box::new(main_loop_handle));
-                }
-
-                (
-                    #handle_name {
-                        state,
-                        cmd_tx,
-                        metrics,
-                        __rillet_view,
-                    },
-                    join_handles,
-                )
-            }
-
             #(#service_spawn_methods)*
         }
 
