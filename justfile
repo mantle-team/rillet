@@ -33,7 +33,7 @@ check-format:
 # Check clippy lints
 check-lint:
     @echo "Running clippy..."
-    cargo clippy --workspace -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # Check tag validity
 check-tag tag:
