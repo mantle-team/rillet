@@ -86,12 +86,13 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     // command count the metrics field needs.
     let getter_impls = generate_getters(&handle_name, &getters);
     let subscription_methods = generate_subscription_methods(&handle_name, &emitted_events);
-    let emit_methods = generate_emit_methods(struct_name, &emitted_events, args.event_capacity);
+    let emit_methods = generate_emit_methods(struct_name, &emitted_events);
     let constructor = generate_constructor(
         struct_name,
         &user_fields,
         &defaults,
-        has_emitter,
+        &emitted_events,
+        args.event_capacity,
         view_type.is_some(),
     );
     let shutdown_method = generate_shutdown_method(&handle_name);
@@ -430,7 +431,8 @@ fn generate_constructor(
     struct_name: &Ident,
     user_fields: &[(Ident, Type)],
     defaults: &[DefaultField],
-    has_emitter: bool,
+    emitted_events: &[Ident],
+    event_capacity: usize,
     has_view: bool,
 ) -> TokenStream {
     let default_names: std::collections::HashSet<_> = defaults.iter().map(|d| &d.name).collect();
@@ -457,10 +459,16 @@ fn generate_constructor(
         })
         .collect();
 
-    let emitter_init = if has_emitter {
-        quote! { __rillet_emitter: rillet::event::Emitter::new(), }
-    } else {
+    let emitter_init = if emitted_events.is_empty() {
         quote! {}
+    } else {
+        quote! {
+            __rillet_emitter: {
+                let mut builder = rillet::event::EmitterBuilder::new();
+                #(builder.add_event::<#emitted_events>(#event_capacity);)*
+                builder.build()
+            },
+        }
     };
 
     let view_init = if has_view {
@@ -495,21 +503,10 @@ fn generate_constructor(
     }
 }
 
-/// Generate emit_<event>() methods and the __rillet_wire_emitter helper.
-fn generate_emit_methods(
-    struct_name: &Ident,
-    emitted_events: &[Ident],
-    event_capacity: usize,
-) -> TokenStream {
+/// Generate emit_<event>() methods.
+fn generate_emit_methods(struct_name: &Ident, emitted_events: &[Ident]) -> TokenStream {
     if emitted_events.is_empty() {
-        // The wire helper is a no-op without events, so the generated spawn
-        // can always call it.
-        return quote! {
-            impl #struct_name {
-                #[doc(hidden)]
-                pub fn __rillet_wire_emitter(&mut self) {}
-            }
-        };
+        return quote! {};
     }
 
     let emit_methods: Vec<TokenStream> = emitted_events
@@ -526,26 +523,9 @@ fn generate_emit_methods(
         })
         .collect();
 
-    let channel_creation: Vec<TokenStream> = emitted_events
-        .iter()
-        .map(|event| {
-            quote! {
-                builder.add_event::<#event>(#event_capacity);
-            }
-        })
-        .collect();
-
     quote! {
         impl #struct_name {
             #(#emit_methods)*
-
-            /// Creates the event channels. Called by the generated spawn.
-            #[doc(hidden)]
-            pub fn __rillet_wire_emitter(&mut self) {
-                let mut builder = rillet::event::EmitterBuilder::new();
-                #(#channel_creation)*
-                self.__rillet_emitter = builder.build();
-            }
         }
     }
 }

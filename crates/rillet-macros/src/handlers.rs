@@ -822,7 +822,6 @@ fn generate_spawn_simple(
                     rillet::metrics::CommandMetrics::<#cmd_count>::new()
                 );
 
-                self.__rillet_wire_emitter();
                 self.__rillet_seed_view();
                 let __rillet_view = self.__rillet_view_slot_any();
 
@@ -998,7 +997,6 @@ fn generate_spawn_with_builder(
                     rillet::metrics::CommandMetrics::<#cmd_count>::new()
                 );
 
-                self.__rillet_wire_emitter();
                 self.__rillet_seed_view();
                 let __rillet_view = self.__rillet_view_slot_any();
 
