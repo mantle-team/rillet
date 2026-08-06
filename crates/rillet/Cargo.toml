@@ -1,0 +1,27 @@
+[package]
+name = "rillet"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+readme = "../../README.md"
+description = "An actor framework with lock-free reads"
+
+[features]
+default = ["im", "smol_str"]
+im = ["dep:im"]
+smol_str = ["dep:smol_str"]
+
+[dependencies]
+rillet-macros = { path = "../rillet-macros", version = "0.0.1" }
+
+arc-swap = "1"
+event-listener = "5"
+smol = "2"
+futures-lite = "2"
+async-io = "2"
+async-channel = "2"
+async-broadcast = "0.7"
+futures = "0.3"
+im = { version = "15", optional = true }
+smol_str = { version = "0.3", optional = true }

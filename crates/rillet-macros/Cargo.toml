@@ -1,7 +1,16 @@
 [package]
 name = "rillet-macros"
-version = "0.0.1"
-edition = "2024"
-repository = "https://github.com/mantle-team/rillet"
-license = "MIT OR Apache-2.0"
-description = "Procedural macros for the rillet actor framework"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+# Required by crates.io before `cargo publish`; yours to write:
+# description = ""
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

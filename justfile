@@ -38,16 +38,18 @@ check-tag tag:
         exit 1
     fi
 
-# Publish the crate
+# Publish the crates
 publish:
-    cargo publish
+    cargo publish -p rillet-macros
+    cargo publish -p rillet
 
 # Check crate packaging
 check-package:
     @echo "Checking package..."
-    cargo publish --dry-run
+    cargo publish --dry-run -p rillet-macros
+    cargo publish --dry-run -p rillet
 
 # Check semver compatibility
 check-semver:
     @echo "Checking semver..."
-    cargo semver-checks
+    cargo semver-checks --package rillet
