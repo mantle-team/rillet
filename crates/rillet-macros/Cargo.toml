@@ -4,8 +4,7 @@ version.workspace = true
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
-# Required by crates.io before `cargo publish`; yours to write:
-# description = ""
+description = "Procedural macros for the rillet actor framework"
 
 [lib]
 proc-macro = true
