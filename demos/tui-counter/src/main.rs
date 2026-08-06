@@ -87,7 +87,7 @@ fn main() -> std::io::Result<()> {
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &counter);
     ratatui::restore();
-    counter.cancel();
+    counter.cancel().wait();
     result
 }
 
