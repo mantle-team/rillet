@@ -121,6 +121,56 @@ fn services_outlive_their_handles() {
     bird.cancel();
 }
 
+#[derive(Clone, Event)]
+pub struct Squawk {
+    pub volume: u32,
+}
+
+#[rillet::service]
+#[rillet(emits = [Chirp, Squawk])]
+pub struct Macaw {}
+
+#[rillet::handlers]
+impl Macaw {
+    #[rillet(command)]
+    fn chirp(&mut self, loudness: u32) {
+        self.emit_chirp(Chirp { loudness });
+    }
+
+    #[rillet(command)]
+    fn squawk(&mut self, volume: u32) {
+        self.emit_squawk(Squawk { volume });
+    }
+}
+
+#[test]
+fn each_event_type_has_its_own_channel() {
+    let macaw = Macaw::new().spawn();
+    let mut chirps = macaw.on_chirp();
+    let mut squawks = macaw.on_squawk();
+
+    macaw.chirp(3);
+    macaw.squawk(9);
+    macaw.chirp(4);
+
+    assert_eq!(
+        wait_on("first chirp", chirps.next()).map(|c| c.loudness),
+        Some(3)
+    );
+    assert_eq!(
+        wait_on("second chirp", chirps.next()).map(|c| c.loudness),
+        Some(4)
+    );
+    assert_eq!(wait_on("squawk", squawks.next()).map(|s| s.volume), Some(9));
+
+    wait_for("per-type publish counters", || {
+        macaw.chirp_published() == 2 && macaw.squawk_published() == 1
+    });
+    assert_eq!(macaw.chirp_subscriber_count(), 1);
+    assert_eq!(macaw.squawk_subscriber_count(), 1);
+    macaw.cancel();
+}
+
 #[rillet::service(event_capacity = 2)]
 #[rillet(emits = [Chirp])]
 pub struct QuietBird {}
