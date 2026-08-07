@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use event_listener::Event;
 
+use crate::cancellation::CancellationToken;
+
 #[cfg(feature = "im")]
 pub use im;
 #[cfg(feature = "smol-str")]
@@ -131,6 +133,34 @@ where
         self.shared.version.fetch_add(1, Ordering::Release);
         self.shared.wake.notify(usize::MAX);
         true
+    }
+
+    /// Blocks until a published view satisfies the predicate, and returns
+    /// it.
+    ///
+    /// Returns None if the token is cancelled before such a view is
+    /// published.
+    pub fn wait(
+        &self,
+        mut pred: impl FnMut(&V) -> bool,
+        cancel: &CancellationToken,
+    ) -> Option<Arc<V>> {
+        loop {
+            // A publish landing between the load and the wait notifies
+            // this listener, so it cannot be lost.
+            let listener = self.shared.wake.listen();
+            let current = self.load();
+            if pred(&current) {
+                return Some(current);
+            }
+            if cancel.is_cancelled() {
+                return None;
+            }
+            futures_lite::future::block_on(futures_lite::future::race(
+                listener,
+                cancel.cancelled(),
+            ));
+        }
     }
 
     /// Returns a watcher that has already seen the current view.
@@ -268,6 +298,50 @@ mod tests {
         assert_eq!(slot.watcher_count(), 1);
         drop(second);
         assert_eq!(slot.watcher_count(), 0);
+    }
+
+    #[test]
+    fn wait_returns_a_satisfying_current_view_without_blocking() {
+        let slot = ViewSlot::new(7u32);
+        let cancel = CancellationToken::new();
+        assert_eq!(slot.wait(|v| *v == 7, &cancel).as_deref(), Some(&7));
+    }
+
+    #[test]
+    fn wait_wakes_on_a_satisfying_publish() {
+        let slot = ViewSlot::new(0u32);
+        let cancel = CancellationToken::new();
+        let waiter = std::thread::spawn({
+            let slot = slot.clone();
+            let cancel = cancel.clone();
+            move || slot.wait(|v| *v >= 5, &cancel)
+        });
+        slot.publish(1);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        slot.publish(5);
+        assert_eq!(waiter.join().unwrap().as_deref(), Some(&5));
+    }
+
+    #[test]
+    fn wait_returns_none_when_cancelled_first() {
+        let slot = ViewSlot::new(0u32);
+        let cancel = CancellationToken::new();
+        let waiter = std::thread::spawn({
+            let slot = slot.clone();
+            let cancel = cancel.clone();
+            move || slot.wait(|v| *v == 99, &cancel)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cancel.cancel();
+        assert!(waiter.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn cancelled_wait_still_returns_a_satisfying_current_view() {
+        let slot = ViewSlot::new(7u32);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(slot.wait(|v| *v == 7, &cancel).as_deref(), Some(&7));
     }
 
     #[test]

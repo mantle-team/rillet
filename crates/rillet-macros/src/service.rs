@@ -639,6 +639,18 @@ fn generate_view_impls(
             pub fn watch_view(&self) -> rillet::view::ViewWatcher<#view_ty> {
                 self.__rillet_slot().watch()
             }
+
+            /// Blocks until a published view satisfies the predicate, and
+            /// returns it.
+            ///
+            /// Returns None if the service is cancelled before such a view
+            /// is published.
+            pub fn wait_view(
+                &self,
+                pred: impl FnMut(&#view_ty) -> bool,
+            ) -> Option<rillet::runtime::Arc<#view_ty>> {
+                self.__rillet_slot().wait(pred, &self.__rillet_cancel_token)
+            }
         }
 
         /// A read-only handle to the service: its view and its events.
@@ -665,6 +677,18 @@ fn generate_view_impls(
             /// Returns a watcher that has already seen the current view.
             pub fn watch_view(&self) -> rillet::view::ViewWatcher<#view_ty> {
                 self.inner.watch_view()
+            }
+
+            /// Blocks until a published view satisfies the predicate, and
+            /// returns it.
+            ///
+            /// Returns None if the service is cancelled before such a view
+            /// is published.
+            pub fn wait_view(
+                &self,
+                pred: impl FnMut(&#view_ty) -> bool,
+            ) -> Option<rillet::runtime::Arc<#view_ty>> {
+                self.inner.wait_view(pred)
             }
 
             #(#subscription_delegations)*

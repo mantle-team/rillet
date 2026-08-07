@@ -4,7 +4,7 @@ members = ["crates/*", "demos/*"]
 default-members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 repository = "https://github.com/mantle-team/rillet"
 license = "MIT OR Apache-2.0"
