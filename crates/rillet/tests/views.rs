@@ -67,8 +67,7 @@ fn unchanged_view_is_not_republished() {
     let counter = Counter::new().spawn();
 
     counter.set(5);
-    wait_for("first set to process", || counter.view().value == 5);
-    let before = counter.view();
+    let before = counter.wait_view(|v| v.value == 5).expect("cancelled");
 
     // A republish of an unchanged view would store a fresh Arc; the
     // processed counter proves the duplicate set fully executed.
@@ -84,6 +83,26 @@ fn unchanged_view_is_not_republished() {
     let next = wait_on("changed publish", watch.changed());
     assert_eq!(next.value, 6);
     counter.cancel();
+}
+
+#[test]
+fn wait_view_blocks_until_a_command_takes_effect() {
+    let counter = Counter::new().spawn();
+    counter.set(41);
+    let view = counter.wait_view(|v| v.value == 41).expect("cancelled");
+    assert_eq!(view.doubled, 82);
+    counter.cancel();
+}
+
+#[test]
+fn wait_view_returns_none_after_cancellation() {
+    let counter = Counter::new().spawn();
+    let waiter = std::thread::spawn({
+        let counter = counter.clone();
+        move || counter.wait_view(|v| v.value == 99)
+    });
+    counter.cancel().wait();
+    assert!(waiter.join().unwrap().is_none());
 }
 
 #[rillet::service]
