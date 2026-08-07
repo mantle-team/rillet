@@ -278,3 +278,20 @@ fn an_undrained_subscriber_panics_the_service_on_emit() {
 
     bird.cancel().wait();
 }
+
+#[test]
+fn receivers_queue_events_and_report_depth() {
+    let bird = Bird::new().spawn();
+    let mut chirps = bird.on_chirp();
+
+    bird.chirp(1);
+    bird.chirp(2);
+    wait_for("both chirps to queue", || chirps.depth() == 2);
+
+    assert_eq!(chirps.try_recv().map(|c| c.loudness), Some(1));
+    assert_eq!(chirps.depth(), 1);
+    assert_eq!(chirps.try_recv().map(|c| c.loudness), Some(2));
+    assert_eq!(chirps.try_recv().map(|c| c.loudness), None);
+    assert_eq!(chirps.depth(), 0);
+    bird.cancel();
+}
