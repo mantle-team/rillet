@@ -9,7 +9,7 @@
 //! previous one. View types must be [`CheapClone`].
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use arc_swap::ArcSwap;
 use event_listener::Event;
@@ -97,6 +97,7 @@ struct Shared<V> {
     current: ArcSwap<V>,
     version: AtomicU64,
     wake: Event,
+    watchers: AtomicUsize,
 }
 
 impl<V> ViewSlot<V>
@@ -110,6 +111,7 @@ where
                 current: ArcSwap::from_pointee(initial),
                 version: AtomicU64::new(0),
                 wake: Event::new(),
+                watchers: AtomicUsize::new(0),
             }),
         }
     }
@@ -133,10 +135,16 @@ where
 
     /// Returns a watcher that has already seen the current view.
     pub fn watch(&self) -> ViewWatcher<V> {
+        self.shared.watchers.fetch_add(1, Ordering::Relaxed);
         ViewWatcher {
             shared: self.shared.clone(),
             seen: self.shared.version.load(Ordering::Acquire),
         }
+    }
+
+    /// Returns the current number of watchers.
+    pub fn watcher_count(&self) -> usize {
+        self.shared.watchers.load(Ordering::Relaxed)
     }
 }
 
@@ -156,6 +164,12 @@ impl<V> Clone for ViewSlot<V> {
 pub struct ViewWatcher<V> {
     shared: Arc<Shared<V>>,
     seen: u64,
+}
+
+impl<V> Drop for ViewWatcher<V> {
+    fn drop(&mut self) {
+        self.shared.watchers.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl<V> ViewWatcher<V>

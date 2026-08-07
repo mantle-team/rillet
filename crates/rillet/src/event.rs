@@ -59,7 +59,9 @@ impl<T: Clone> EventReceiver<T> {
 pub struct Emitter {
     senders: Arc<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
     /// Published count per event type.
-    counters: Arc<HashMap<TypeId, AtomicU64>>,
+    published_counts: Arc<HashMap<TypeId, AtomicU64>>,
+    /// Type-erased subscriber counters, one per event type.
+    subscriber_counters: Arc<Vec<Box<dyn Fn() -> usize + Send + Sync>>>,
     /// Keep inactive receivers alive to prevent channels from closing.
     /// async_broadcast closes the channel when all receivers (including inactive) are dropped.
     _inactive_receivers: Arc<Vec<Box<dyn Any + Send + Sync>>>,
@@ -70,7 +72,8 @@ impl Emitter {
     pub fn new() -> Self {
         Self {
             senders: Arc::new(HashMap::new()),
-            counters: Arc::new(HashMap::new()),
+            published_counts: Arc::new(HashMap::new()),
+            subscriber_counters: Arc::new(Vec::new()),
             _inactive_receivers: Arc::new(Vec::new()),
         }
     }
@@ -79,12 +82,14 @@ impl Emitter {
     #[doc(hidden)]
     pub fn with_senders(
         senders: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
-        counters: HashMap<TypeId, AtomicU64>,
+        published_counts: HashMap<TypeId, AtomicU64>,
+        subscriber_counters: Vec<Box<dyn Fn() -> usize + Send + Sync>>,
         inactive_receivers: Vec<Box<dyn Any + Send + Sync>>,
     ) -> Self {
         Self {
             senders: Arc::new(senders),
-            counters: Arc::new(counters),
+            published_counts: Arc::new(published_counts),
+            subscriber_counters: Arc::new(subscriber_counters),
             _inactive_receivers: Arc::new(inactive_receivers),
         }
     }
@@ -105,8 +110,8 @@ impl Emitter {
                     panic!("event queue full: {}", std::any::type_name::<E>());
                 }
             }
-            if let Some(counter) = self.counters.get(&TypeId::of::<E>()) {
-                counter.fetch_add(1, Ordering::Relaxed);
+            if let Some(count) = self.published_counts.get(&TypeId::of::<E>()) {
+                count.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -124,7 +129,7 @@ impl Emitter {
 
     /// Returns the number of events published for this event type.
     pub fn published<E: Event>(&self) -> u64 {
-        self.counters
+        self.published_counts
             .get(&TypeId::of::<E>())
             .map(|c| c.load(Ordering::Relaxed))
             .unwrap_or(0)
@@ -138,6 +143,14 @@ impl Emitter {
             .map(|tx| tx.receiver_count())
             .unwrap_or(0)
     }
+
+    /// Returns the current number of subscribers across all event types.
+    pub fn total_subscribers(&self) -> usize {
+        self.subscriber_counters
+            .iter()
+            .map(|counter| counter())
+            .sum()
+    }
 }
 
 impl Default for Emitter {
@@ -150,7 +163,8 @@ impl Default for Emitter {
 #[doc(hidden)]
 pub struct EmitterBuilder {
     senders: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
-    counters: HashMap<TypeId, AtomicU64>,
+    published_counts: HashMap<TypeId, AtomicU64>,
+    subscriber_counters: Vec<Box<dyn Fn() -> usize + Send + Sync>>,
     // Keep inactive receivers alive to prevent channel from closing
     _inactive_receivers: Vec<Box<dyn Any + Send + Sync>>,
 }
@@ -165,7 +179,8 @@ impl EmitterBuilder {
     pub fn new() -> Self {
         Self {
             senders: HashMap::new(),
-            counters: HashMap::new(),
+            published_counts: HashMap::new(),
+            subscriber_counters: Vec::new(),
             _inactive_receivers: Vec::new(),
         }
     }
@@ -174,7 +189,11 @@ impl EmitterBuilder {
     pub fn add_event<E: Event>(&mut self, capacity: usize) -> Sender<E> {
         let (tx, rx) = async_broadcast::broadcast(capacity);
         self.senders.insert(TypeId::of::<E>(), Box::new(tx.clone()));
-        self.counters.insert(TypeId::of::<E>(), AtomicU64::new(0));
+        self.published_counts
+            .insert(TypeId::of::<E>(), AtomicU64::new(0));
+        let counter_tx = tx.clone();
+        self.subscriber_counters
+            .push(Box::new(move || counter_tx.receiver_count()));
         // Keep an inactive receiver alive to prevent the channel from
         // closing. It must be deactivated: an active receiver that is
         // never drained fills after `capacity` events and blocks every
@@ -184,7 +203,12 @@ impl EmitterBuilder {
     }
 
     pub fn build(self) -> Emitter {
-        Emitter::with_senders(self.senders, self.counters, self._inactive_receivers)
+        Emitter::with_senders(
+            self.senders,
+            self.published_counts,
+            self.subscriber_counters,
+            self._inactive_receivers,
+        )
     }
 }
 

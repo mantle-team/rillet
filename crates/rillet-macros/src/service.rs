@@ -98,6 +98,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         view_type.is_some(),
     );
     let shutdown_method = generate_shutdown_method(&handle_name);
+    let observer_probe = generate_observer_probe(struct_name, has_emitter, view_type.is_some());
     let view_impls = generate_view_impls(
         struct_name,
         &handle_name,
@@ -131,6 +132,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #emit_methods
         #constructor
         #shutdown_method
+        #observer_probe
         #view_impls
         #capacity_const
     })
@@ -655,6 +657,34 @@ fn generate_view_impls(
             }
 
             #(#subscription_delegations)*
+        }
+    }
+}
+
+/// Generate the `__rillet_has_observers` method: whether any event
+/// subscriber or view watcher remains.
+fn generate_observer_probe(struct_name: &Ident, has_emitter: bool, has_view: bool) -> TokenStream {
+    let emitter_expr = if has_emitter {
+        quote! { self.__rillet_emitter.total_subscribers() > 0 }
+    } else {
+        quote! { false }
+    };
+    let view_expr = if has_view {
+        quote! {
+            self.__rillet_view_slot
+                .as_ref()
+                .is_some_and(|slot| slot.watcher_count() > 0)
+        }
+    } else {
+        quote! { false }
+    };
+
+    quote! {
+        impl #struct_name {
+            #[doc(hidden)]
+            pub fn __rillet_has_observers(&self) -> bool {
+                #emitter_expr || #view_expr
+            }
         }
     }
 }

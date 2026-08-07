@@ -6,7 +6,9 @@
 //! an immutable snapshot of its state that readers load without taking any
 //! lock.
 //!
-//! A service runs until cancelled.
+//! A service runs until it is cancelled or until nothing can reach it:
+//! every handle has been dropped, and either every event source it
+//! listens to has closed or no subscriber or view watcher remains.
 
 mod cancellation;
 mod spawner;

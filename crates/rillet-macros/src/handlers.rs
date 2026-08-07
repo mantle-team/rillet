@@ -555,6 +555,38 @@ fn generate_spawn_impl(
         }
     }));
 
+    // One flag per event source, recording whether the source is still
+    // open.
+    let event_open_flags: Vec<Ident> = event_handlers
+        .iter()
+        .map(|handler| format_ident!("{}_open", handler.method_name))
+        .collect();
+
+    // Whether any input source is still open. A watch source is always
+    // open: its slot has no closed state.
+    let inputs_open_expr = {
+        let mut terms: Vec<TokenStream> = event_open_flags
+            .iter()
+            .map(|flag| quote! { #flag })
+            .collect();
+        if !watch_handlers.is_empty() {
+            terms.push(quote! { true });
+        }
+        if terms.is_empty() {
+            quote! { false }
+        } else {
+            quote! { #(#terms)||* }
+        }
+    };
+    let exit_check = quote! {
+        if !cmd_open {
+            let inputs_open = #inputs_open_expr;
+            if !inputs_open || !state.read().unwrap().__rillet_has_observers() {
+                break;
+            }
+        }
+    };
+
     // In each event and watch arm, the handler and the view republication
     // run under one write lock acquisition.
     let mut event_select_arms: Vec<TokenStream> = event_handlers
@@ -562,14 +594,23 @@ fn generate_spawn_impl(
         .map(|handler| {
             let method = &handler.method_name;
             let fut_name = format_ident!("{}_rx_fut", handler.method_name);
+            let open_name = format_ident!("{}_open", handler.method_name);
             quote! {
                 result = #fut_name => {
-                    if let Some(event) = result {
-                        let mut s = state.write().unwrap();
-                        s.#method(event);
-                        s.__rillet_publish_view();
+                    match result {
+                        Some(event) => {
+                            {
+                                let mut s = state.write().unwrap();
+                                s.#method(event);
+                                s.__rillet_publish_view();
+                            }
+                            #exit_check
+                        }
+                        None => {
+                            #open_name = false;
+                            #exit_check
+                        }
                     }
-                    // Future will be recreated at next loop iteration
                 }
             }
         })
@@ -579,9 +620,12 @@ fn generate_spawn_impl(
         let fut_name = format_ident!("{}_rx_fut", handler.method_name);
         quote! {
             view = #fut_name => {
-                let mut s = state.write().unwrap();
-                s.#method(view);
-                s.__rillet_publish_view();
+                {
+                    let mut s = state.write().unwrap();
+                    s.#method(view);
+                    s.__rillet_publish_view();
+                }
+                #exit_check
             }
         }
     }));
@@ -593,8 +637,20 @@ fn generate_spawn_impl(
         .map(|handler| {
             let rx_name = format_ident!("{}_rx", handler.method_name);
             let fut_name = format_ident!("{}_rx_fut", handler.method_name);
+            let open_name = format_ident!("{}_open", handler.method_name);
+            let closed_name = format_ident!("{}_closed", handler.method_name);
             quote! {
-                let mut #fut_name = std::pin::pin!(#rx_name.next().fuse());
+                let #closed_name = !#open_name;
+                let mut #fut_name = std::pin::pin!(
+                    async {
+                        if #closed_name {
+                            std::future::pending().await
+                        } else {
+                            #rx_name.next().await
+                        }
+                    }
+                    .fuse()
+                );
             }
         })
         .collect();
@@ -655,6 +711,7 @@ fn generate_spawn_impl(
             let state = state_clone;
             let mut cmd_rx = cmd_rx;
             let mut cmd_open = true;
+            #(let mut #event_open_flags = true;)*
             loop {
                 use rillet::runtime::FutureExt;
 
@@ -674,7 +731,10 @@ fn generate_spawn_impl(
                             Ok(cmd) => {
                                 #cmd_process_with_metrics
                             }
-                            Err(_) => cmd_open = false,
+                            Err(_) => {
+                                cmd_open = false;
+                                #exit_check
+                            }
                         }
                     }
                     #(#event_select_arms)*
@@ -684,13 +744,12 @@ fn generate_spawn_impl(
     } else if has_commands {
         quote! {
             let state = state_clone;
-            let mut cmd_rx = cmd_rx;
-            let mut cmd_open = true;
+            let cmd_rx = cmd_rx;
             loop {
                 use rillet::runtime::FutureExt;
 
                 let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
-                #cmd_recv_setup
+                let mut cmd_fut = std::pin::pin!(cmd_rx.recv().fuse());
 
                 rillet::runtime::futures::select! {
                     _ = cancel_fut => {
@@ -703,7 +762,7 @@ fn generate_spawn_impl(
                             Ok(cmd) => {
                                 #cmd_process_with_metrics
                             }
-                            Err(_) => cmd_open = false,
+                            Err(_) => break,
                         }
                     }
                 }
@@ -712,16 +771,25 @@ fn generate_spawn_impl(
     } else if has_events {
         quote! {
             let state = state_clone;
-            let _cmd_rx = cmd_rx;
+            let cmd_rx = cmd_rx;
+            let mut cmd_open = true;
+            #(let mut #event_open_flags = true;)*
             loop {
                 use rillet::runtime::FutureExt;
 
                 #(#event_fut_setup)*
 
                 let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+                #cmd_recv_setup
 
                 rillet::runtime::futures::select! {
                     _ = cancel_fut => break,
+                    result = cmd_fut => {
+                        if result.is_err() {
+                            cmd_open = false;
+                            #exit_check
+                        }
+                    }
                     #(#event_select_arms)*
                 }
             }
@@ -729,8 +797,20 @@ fn generate_spawn_impl(
     } else {
         quote! {
             let _state = state_clone;
-            let _cmd_rx = cmd_rx;
-            cancel_token.cancelled().await;
+            use rillet::runtime::FutureExt;
+
+            let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
+            let mut closed_fut = std::pin::pin!(
+                async {
+                    while cmd_rx.recv().await.is_ok() {}
+                }
+                .fuse()
+            );
+
+            rillet::runtime::futures::select! {
+                _ = cancel_fut => {}
+                _ = closed_fut => {}
+            }
         }
     };
 
