@@ -12,6 +12,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -219,6 +220,7 @@ struct CellInner {
     wake: Event,
     /// Conclusions queued by handlers and not yet applied.
     conclusions: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+    closed: AtomicBool,
 }
 
 impl OpsCell {
@@ -228,13 +230,15 @@ impl OpsCell {
                 registries: Mutex::new(HashMap::new()),
                 wake: Event::new(),
                 conclusions: Mutex::new(Vec::new()),
+                closed: AtomicBool::new(false),
             }),
         }
     }
 
     /// Parks a resolver under a key, stamping the deadline onto its
     /// operation. A resolver already parked under the key is displaced and
-    /// its operation concludes as `Lost`.
+    /// its operation concludes as `Lost`; a resolver inserted into a closed
+    /// cell concludes as `Lost` at once.
     pub fn insert<K, R>(
         &self,
         op: &'static str,
@@ -246,6 +250,9 @@ impl OpsCell {
         K: Ord + Clone + Send + 'static,
         R: Clone + Send + Sync + 'static,
     {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return;
+        }
         let registry = self.registry_or_init::<K, R>(op, timeout_reason);
         resolver.set_deadline(deadline);
         registry.insert(key, resolver, deadline);
@@ -370,6 +377,15 @@ impl OpsCell {
     fn listen(&self) -> EventListener {
         self.inner.wake.listen()
     }
+
+    /// Closes the cell: every parked operation concludes as `Lost`, and so
+    /// does every operation inserted afterwards.
+    pub fn close(&self) {
+        self.inner.closed.store(true, Ordering::Release);
+        for source in self.sources() {
+            source.drain();
+        }
+    }
 }
 
 impl Default for OpsCell {
@@ -482,6 +498,7 @@ impl<K: Ord + Clone, R> Entries<K, R> {
 trait DeadlineSource: Send + Sync {
     fn next_deadline(&self) -> Option<Instant>;
     fn expire(&self, now: Instant);
+    fn drain(&self);
     fn as_any(&self) -> &dyn Any;
     fn as_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
 }
@@ -516,6 +533,12 @@ where
         for resolver in due {
             resolver.fail(self.timeout_reason.clone());
         }
+    }
+
+    fn drain(&self) {
+        let mut entries = self.entries.lock().expect("op registry poisoned");
+        entries.by_key.clear();
+        entries.deadlines.clear();
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -623,6 +646,24 @@ mod tests {
 
         assert!(matches!(*first.state(), OpState::Lost { .. }));
         assert!(second.state().is_pending());
+    }
+
+    #[test]
+    fn close_concludes_parked_operations_as_lost() {
+        let cell = OpsCell::new();
+        let (op, resolver) = Op::<Reason>::__rillet_pair();
+        cell.insert("send", 1u32, resolver, None, || Reason::TimedOut);
+        cell.close();
+        assert!(matches!(*op.state(), OpState::Lost { .. }));
+    }
+
+    #[test]
+    fn insert_into_a_closed_cell_concludes_as_lost() {
+        let cell = OpsCell::new();
+        cell.close();
+        let (op, resolver) = Op::<Reason>::__rillet_pair();
+        cell.insert("send", 1u32, resolver, None, || Reason::TimedOut);
+        assert!(matches!(*op.state(), OpState::Lost { .. }));
     }
 
     #[test]
