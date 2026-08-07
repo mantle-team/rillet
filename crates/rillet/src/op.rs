@@ -253,9 +253,9 @@ impl OpsCell {
         if self.inner.closed.load(Ordering::Acquire) {
             return;
         }
-        let registry = self.registry_or_init::<K, R>(op, timeout_reason);
+        let registry = self.registry_or_init::<K, R>(op);
         resolver.set_deadline(deadline);
-        registry.insert(key, resolver, deadline);
+        registry.insert(key, resolver, deadline.map(|at| (at, timeout_reason())));
         self.inner.wake.notify(usize::MAX);
     }
 
@@ -326,11 +326,7 @@ impl OpsCell {
         registry.take(key)
     }
 
-    fn registry_or_init<K, R>(
-        &self,
-        op: &'static str,
-        timeout_reason: impl FnOnce() -> R,
-    ) -> Arc<Registry<K, R>>
+    fn registry_or_init<K, R>(&self, op: &'static str) -> Arc<Registry<K, R>>
     where
         K: Ord + Clone + Send + 'static,
         R: Clone + Send + Sync + 'static,
@@ -342,7 +338,7 @@ impl OpsCell {
             .expect("ops registries poisoned");
         let registry = registries
             .entry(op)
-            .or_insert_with(|| Arc::new(Registry::<K, R>::new(timeout_reason())))
+            .or_insert_with(|| Arc::new(Registry::<K, R>::new()))
             .clone();
         drop(registries);
         registry
@@ -440,7 +436,6 @@ pub async fn expire_loop(cell: OpsCell, cancel: CancellationToken) {
 /// The typed registry behind one op method's deferred operations.
 struct Registry<K, R> {
     entries: Mutex<Entries<K, R>>,
-    timeout_reason: R,
 }
 
 struct Entries<K, R> {
@@ -450,7 +445,8 @@ struct Entries<K, R> {
 
 struct Entry<R> {
     resolver: Resolver<R>,
-    deadline: Option<Instant>,
+    /// When the operation expires and the reason it then fails with.
+    deadline: Option<(Instant, R)>,
 }
 
 impl<K, R> Registry<K, R>
@@ -458,21 +454,20 @@ where
     K: Ord + Clone + Send + 'static,
     R: Clone + Send + Sync + 'static,
 {
-    fn new(timeout_reason: R) -> Self {
+    fn new() -> Self {
         Self {
             entries: Mutex::new(Entries {
                 by_key: BTreeMap::new(),
                 deadlines: BTreeSet::new(),
             }),
-            timeout_reason,
         }
     }
 
-    fn insert(&self, key: K, resolver: Resolver<R>, deadline: Option<Instant>) {
+    fn insert(&self, key: K, resolver: Resolver<R>, deadline: Option<(Instant, R)>) {
         let mut entries = self.entries.lock().expect("op registry poisoned");
         entries.remove(&key);
-        if let Some(deadline) = deadline {
-            entries.deadlines.insert((deadline, key.clone()));
+        if let Some((at, _)) = deadline {
+            entries.deadlines.insert((at, key.clone()));
         }
         entries.by_key.insert(key, Entry { resolver, deadline });
     }
@@ -482,16 +477,17 @@ where
             .lock()
             .expect("op registry poisoned")
             .remove(key)
+            .map(|entry| entry.resolver)
     }
 }
 
 impl<K: Ord + Clone, R> Entries<K, R> {
-    fn remove(&mut self, key: &K) -> Option<Resolver<R>> {
+    fn remove(&mut self, key: &K) -> Option<Entry<R>> {
         let entry = self.by_key.remove(key)?;
-        if let Some(deadline) = entry.deadline {
-            self.deadlines.remove(&(deadline, key.clone()));
+        if let Some((at, _)) = entry.deadline {
+            self.deadlines.remove(&(at, key.clone()));
         }
-        Some(entry.resolver)
+        Some(entry)
     }
 }
 
@@ -525,13 +521,15 @@ where
                 if deadline > now {
                     break;
                 }
-                if let Some(resolver) = entries.remove(&key) {
-                    due.push(resolver);
+                if let Some(entry) = entries.remove(&key)
+                    && let Some((_, reason)) = entry.deadline
+                {
+                    due.push((entry.resolver, reason));
                 }
             }
         }
-        for resolver in due {
-            resolver.fail(self.timeout_reason.clone());
+        for (resolver, reason) in due {
+            resolver.fail(reason);
         }
     }
 
@@ -646,6 +644,28 @@ mod tests {
 
         assert!(matches!(*first.state(), OpState::Lost { .. }));
         assert!(second.state().is_pending());
+    }
+
+    #[test]
+    fn each_operation_times_out_with_its_own_reason() {
+        let cell = OpsCell::new();
+        let now = Instant::now();
+        let (first, resolver) = Op::<Reason>::__rillet_pair();
+        cell.insert("send", 1u32, resolver, Some(now), || Reason::Declined);
+        let (second, resolver) = Op::<Reason>::__rillet_pair();
+        cell.insert("send", 2u32, resolver, Some(now), || Reason::TimedOut);
+
+        cell.expire(now);
+        assert_eq!(first.state().failure(), Some(&Reason::Declined));
+        assert_eq!(second.state().failure(), Some(&Reason::TimedOut));
+    }
+
+    #[test]
+    fn timeout_reason_is_unevaluated_without_a_deadline() {
+        let cell = OpsCell::new();
+        let (op, resolver) = Op::<Reason>::__rillet_pair();
+        cell.insert("send", 1u32, resolver, None, || unreachable!());
+        assert!(op.state().is_pending());
     }
 
     #[test]
