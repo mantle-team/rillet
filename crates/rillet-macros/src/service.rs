@@ -83,6 +83,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     inject_cancel_token_field(fields);
     inject_join_handles_field(fields);
     inject_sampling_state_field(fields);
+    inject_ops_cell_field(fields);
 
     // The handle struct itself is generated in handlers.rs, which knows the
     // command count the metrics field needs.
@@ -279,6 +280,15 @@ fn inject_sampling_state_field(fields: &mut FieldsNamed) {
         __rillet_sampling_state: rillet::metrics::SamplingState
     };
     fields.named.push(sampling_state_field);
+}
+
+/// Inject a hidden ops cell field into the struct for deferred operations.
+fn inject_ops_cell_field(fields: &mut FieldsNamed) {
+    let ops_cell_field: syn::Field = syn::parse_quote! {
+        #[doc(hidden)]
+        __rillet_ops: rillet::op::OpsCell
+    };
+    fields.named.push(ops_cell_field);
 }
 
 // ============================================================================
@@ -493,6 +503,7 @@ fn generate_constructor(
                     __rillet_cancel_token: rillet::runtime::CancellationToken::new(),
                     __rillet_join_handles: rillet::runtime::Arc::new(rillet::runtime::TaskSet::new()),
                     __rillet_sampling_state: rillet::metrics::SamplingState::new(),
+                    __rillet_ops: rillet::op::OpsCell::new(),
                 }
             }
 

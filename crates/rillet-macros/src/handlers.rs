@@ -15,7 +15,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::case::{to_pascal_case, to_snake_case};
-use syn::{Error, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, Result, Type, parse2};
+use syn::{Error, Expr, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, Result, Type, parse2};
 
 /// A parsed command method.
 struct CommandMethod {
@@ -55,6 +55,32 @@ struct TaskMethod {
     extra_params: Vec<(Ident, Type)>,
 }
 
+/// A parsed op handler: a command whose handle method returns an `Op`
+/// carrying its eventual outcome.
+struct OpMethod {
+    method_name: Ident,
+    variant_name: Ident,
+    params: Vec<(Ident, Type)>,
+    reason_ty: Type,
+    kind: OpKind,
+}
+
+/// How an op concludes: the handler returns the outcome itself, or the
+/// outcome arrives later and is delivered by key.
+enum OpKind {
+    Immediate,
+    Deferred(Box<DeferredOp>),
+}
+
+/// The declaration of an op whose outcome arrives later: the method that
+/// executes it, the reason expiry fails it with, and the type of the key
+/// that correlates its outcome.
+struct DeferredOp {
+    execute: Ident,
+    timeout: Expr,
+    key_ty: Type,
+}
+
 /// Expands `#[rillet::handlers]`.
 pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let impl_block: ItemImpl = parse2(item)?;
@@ -80,13 +106,17 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut event_handlers: Vec<EventHandler> = Vec::new();
     let mut watch_handlers: Vec<WatchHandler> = Vec::new();
     let mut task_methods: Vec<TaskMethod> = Vec::new();
+    let mut op_methods: Vec<OpMethod> = Vec::new();
     let mut clean_items: Vec<ImplItem> = Vec::new();
 
     for item in impl_block.items.iter() {
         if let ImplItem::Fn(method) = item {
             let attrs = parse_method_attrs(method)?;
 
-            if attrs.is_command {
+            if let Some(op_attr) = attrs.op {
+                op_methods.push(parse_op_method(method, op_attr)?);
+                clean_items.push(ImplItem::Fn(strip_rillet_attrs(method.clone())));
+            } else if attrs.is_command {
                 command_methods.push(CommandMethod {
                     method_name: method.sig.ident.clone(),
                     variant_name: format_ident!(
@@ -147,13 +177,15 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         }
     }
 
-    let cmd_count = command_methods.len();
+    let cmd_count = command_methods.len() + op_methods.len();
     let (command_enum, execute_impl, handle_sender_impl, metrics_impl) = generate_command_infra(
         &struct_name,
         &command_enum_name,
         &handle_name,
         &command_methods,
+        &op_methods,
     );
+    let op_conclusions = generate_op_conclusions(&struct_name, &op_methods);
 
     // The handle struct is generated here, not in service.rs: the metrics
     // field needs the command count.
@@ -170,11 +202,17 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         }
     };
 
+    let has_commands = !command_methods.is_empty() || !op_methods.is_empty();
+    let has_deferred_ops = op_methods
+        .iter()
+        .any(|op| matches!(op.kind, OpKind::Deferred(_)));
     let spawn_impl = generate_spawn_impl(
         &struct_name,
         &handle_name,
         &command_enum_name,
-        &command_methods,
+        has_commands,
+        cmd_count,
+        has_deferred_ops,
         &event_handlers,
         &watch_handlers,
         &task_methods,
@@ -199,6 +237,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #handle_struct
         #clean_impl
         #handle_sender_impl
+        #op_conclusions
         #spawn_impl
         #direct_impl
         #direct_mut_impl
@@ -218,6 +257,13 @@ struct MethodAttrs {
     is_task: bool,
     from_field: Option<Ident>,
     watch_field: Option<Ident>,
+    op: Option<OpAttr>,
+}
+
+/// The parsed arguments of an `op` attribute.
+struct OpAttr {
+    execute: Option<Ident>,
+    timeout: Option<Expr>,
 }
 
 fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
@@ -228,6 +274,7 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
         is_task: false,
         from_field: None,
         watch_field: None,
+        op: None,
     };
 
     for attr in &method.attrs {
@@ -244,6 +291,29 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
                 attrs.is_direct_mut = true;
             } else if meta.path.is_ident("task") {
                 attrs.is_task = true;
+            } else if meta.path.is_ident("op") {
+                let mut op_attr = OpAttr {
+                    execute: None,
+                    timeout: None,
+                };
+                if meta.input.peek(syn::token::Paren) {
+                    meta.parse_nested_meta(|op_meta| {
+                        if op_meta.path.is_ident("execute") {
+                            op_meta.input.parse::<syn::Token![=]>()?;
+                            op_attr.execute = Some(op_meta.input.parse()?);
+                        } else if op_meta.path.is_ident("timeout") {
+                            op_meta.input.parse::<syn::Token![=]>()?;
+                            op_attr.timeout = Some(op_meta.input.parse()?);
+                        } else {
+                            return Err(op_meta.error(
+                                "unknown op argument; expected `execute = <method>` or \
+                                 `timeout = <expr>`",
+                            ));
+                        }
+                        Ok(())
+                    })?;
+                }
+                attrs.op = Some(op_attr);
             } else if meta.path.is_ident("from") {
                 meta.input.parse::<syn::Token![=]>()?;
                 let field: Ident = meta.input.parse()?;
@@ -255,7 +325,7 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
             } else {
                 return Err(meta.error(
                     "unknown rillet attribute; expected `command`, `direct`, `direct_mut`, \
-                     `task`, `from = <field>`, or `watch = <field>`",
+                     `task`, `op`, `from = <field>`, or `watch = <field>`",
                 ));
             }
             Ok(())
@@ -267,6 +337,7 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
         (attrs.is_direct, "direct"),
         (attrs.is_direct_mut, "direct_mut"),
         (attrs.is_task, "task"),
+        (attrs.op.is_some(), "op"),
         (attrs.from_field.is_some(), "from"),
         (attrs.watch_field.is_some(), "watch"),
     ]
@@ -313,6 +384,145 @@ fn strip_rillet_attrs(mut method: ImplItemFn) -> ImplItemFn {
     method
 }
 
+/// Parses an op method.
+///
+/// A method declaring `execute = <method>` describes an outcome that
+/// arrives later: it is an associated fn, run on the caller's thread,
+/// returning the `Start<K, R>` that names the operation's key and
+/// deadline. A method without it produces the outcome itself: an ordinary
+/// handler returning `Result<(), R>`, whose return value concludes the
+/// operation.
+fn parse_op_method(method: &ImplItemFn, attr: OpAttr) -> Result<OpMethod> {
+    let method_name = method.sig.ident.clone();
+    let variant_name = format_ident!("{}", to_pascal_case(&method_name.to_string()));
+    let params = extract_all_params(&method.sig.inputs)?;
+
+    if let Some(execute) = attr.execute {
+        if method.sig.receiver().is_some() {
+            return Err(Error::new_spanned(
+                &method.sig,
+                "a deferred op's enqueue fn runs on the caller's thread and cannot take `self`",
+            ));
+        }
+        let Some(timeout) = attr.timeout else {
+            return Err(Error::new_spanned(
+                &method.sig,
+                "a deferred op must declare `timeout = <reason expr>`",
+            ));
+        };
+        let (key_ty, reason_ty) = extract_start_types(&method.sig.output)?;
+        Ok(OpMethod {
+            method_name,
+            variant_name,
+            params,
+            reason_ty,
+            kind: OpKind::Deferred(Box::new(DeferredOp {
+                execute,
+                timeout,
+                key_ty,
+            })),
+        })
+    } else {
+        if attr.timeout.is_some() {
+            return Err(Error::new_spanned(
+                &method.sig,
+                "`timeout` applies only to deferred ops, declared with `execute = <method>`",
+            ));
+        }
+        if method.sig.receiver().is_none() {
+            return Err(Error::new_spanned(
+                &method.sig,
+                "an immediate op handler must take `&mut self`",
+            ));
+        }
+        let reason_ty = extract_result_reason(&method.sig.output)?;
+        Ok(OpMethod {
+            method_name,
+            variant_name,
+            params,
+            reason_ty,
+            kind: OpKind::Immediate,
+        })
+    }
+}
+
+/// Extracts `(K, R)` from an enqueue fn's `-> Start<K, R>` return type.
+fn extract_start_types(output: &syn::ReturnType) -> Result<(Type, Type)> {
+    let err = || {
+        Error::new_spanned(
+            output,
+            "a deferred op's enqueue fn must return `Start<Key, Reason>`",
+        )
+    };
+    let syn::ReturnType::Type(_, ty) = output else {
+        return Err(err());
+    };
+    let Type::Path(path) = &**ty else {
+        return Err(err());
+    };
+    let segment = path.path.segments.last().ok_or_else(err)?;
+    if segment.ident != "Start" {
+        return Err(err());
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return Err(err());
+    };
+    let types: Vec<&Type> = args
+        .args
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+        .collect();
+    match types.as_slice() {
+        [key_ty, reason_ty] => Ok(((*key_ty).clone(), (*reason_ty).clone())),
+        _ => Err(err()),
+    }
+}
+
+/// Extracts `R` from an immediate op handler's `-> Result<(), R>` return
+/// type.
+fn extract_result_reason(output: &syn::ReturnType) -> Result<Type> {
+    let err = || {
+        Error::new_spanned(
+            output,
+            "an immediate op handler must return `Result<(), Reason>`",
+        )
+    };
+    let syn::ReturnType::Type(_, ty) = output else {
+        return Err(err());
+    };
+    let Type::Path(path) = &**ty else {
+        return Err(err());
+    };
+    let segment = path.path.segments.last().ok_or_else(err)?;
+    if segment.ident != "Result" {
+        return Err(err());
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return Err(err());
+    };
+    let types: Vec<&Type> = args
+        .args
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+        .collect();
+    match types.as_slice() {
+        [ok_ty, reason_ty] => {
+            let is_unit = matches!(ok_ty, Type::Tuple(tuple) if tuple.elems.is_empty());
+            if !is_unit {
+                return Err(err());
+            }
+            Ok((*reason_ty).clone())
+        }
+        _ => Err(err()),
+    }
+}
+
 /// Derives the subscription method name from the event type, MessageSent
 /// becoming on_message_sent.
 fn derive_subscription_method(event_type: &Type) -> Result<Ident> {
@@ -349,10 +559,11 @@ fn generate_command_infra(
     command_enum_name: &Ident,
     handle_name: &Ident,
     commands: &[CommandMethod],
+    ops: &[OpMethod],
 ) -> (TokenStream, TokenStream, TokenStream, TokenStream) {
-    let cmd_count = commands.len();
+    let cmd_count = commands.len() + ops.len();
 
-    let enum_variants: Vec<TokenStream> = commands
+    let mut enum_variants: Vec<TokenStream> = commands
         .iter()
         .map(|cmd| {
             let variant = &cmd.variant_name;
@@ -364,8 +575,22 @@ fn generate_command_infra(
             }
         })
         .collect();
+    enum_variants.extend(ops.iter().map(|op| {
+        let variant = &op.variant_name;
+        let reason_ty = &op.reason_ty;
+        match &op.kind {
+            OpKind::Immediate => {
+                let types: Vec<_> = op.params.iter().map(|(_, ty)| ty).collect();
+                quote! { #variant(#(#types,)* rillet::op::Resolver<#reason_ty>), }
+            }
+            OpKind::Deferred(deferred) => {
+                let key_ty = &deferred.key_ty;
+                quote! { #variant(rillet::op::Start<#key_ty, #reason_ty>, rillet::op::Resolver<#reason_ty>), }
+            }
+        }
+    }));
 
-    let index_arms: Vec<TokenStream> = commands
+    let mut index_arms: Vec<TokenStream> = commands
         .iter()
         .enumerate()
         .map(|(i, cmd)| {
@@ -377,13 +602,19 @@ fn generate_command_infra(
             }
         })
         .collect();
+    index_arms.extend(ops.iter().enumerate().map(|(i, op)| {
+        let idx = commands.len() + i;
+        let variant = &op.variant_name;
+        quote! { Self::#variant(..) => #idx, }
+    }));
 
     let names: Vec<String> = commands
         .iter()
         .map(|cmd| cmd.method_name.to_string())
+        .chain(ops.iter().map(|op| op.method_name.to_string()))
         .collect();
 
-    let index_body = if commands.is_empty() {
+    let index_body = if commands.is_empty() && ops.is_empty() {
         quote! { unreachable!("empty command enum cannot be instantiated") }
     } else {
         quote! {
@@ -411,7 +642,7 @@ fn generate_command_infra(
         }
     };
 
-    let match_arms: Vec<TokenStream> = commands
+    let mut match_arms: Vec<TokenStream> = commands
         .iter()
         .map(|cmd| {
             let variant = &cmd.variant_name;
@@ -430,6 +661,54 @@ fn generate_command_infra(
             }
         })
         .collect();
+    match_arms.extend(ops.iter().map(|op| {
+        let variant = &op.variant_name;
+        let method = &op.method_name;
+        let name_str = op.method_name.to_string();
+        match &op.kind {
+            OpKind::Immediate => {
+                let param_names: Vec<_> = op
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format_ident!("v{}", i))
+                    .collect();
+                quote! {
+                    #command_enum_name::#variant(#(#param_names,)* __resolver) => {
+                        match state.#method(#(#param_names),*) {
+                            Ok(()) => state
+                                .__rillet_ops
+                                .queue_conclusion(move || __resolver.succeed()),
+                            Err(__reason) => state
+                                .__rillet_ops
+                                .queue_conclusion(move || __resolver.fail(__reason)),
+                        }
+                    }
+                }
+            }
+            OpKind::Deferred(deferred) => {
+                let DeferredOp {
+                    execute,
+                    timeout,
+                    key_ty,
+                } = &**deferred;
+                let reason_ty = &op.reason_ty;
+                quote! {
+                    #command_enum_name::#variant(__start, __resolver) => {
+                        let (__key, __deadline) = __start.__rillet_parts();
+                        state.__rillet_ops.insert::<#key_ty, #reason_ty>(
+                            #name_str,
+                            __key.clone(),
+                            __resolver,
+                            __deadline,
+                            || #timeout,
+                        );
+                        state.#execute(__key)
+                    }
+                }
+            }
+        }
+    }));
 
     let execute_impl = quote! {
         impl #command_enum_name {
@@ -441,7 +720,7 @@ fn generate_command_infra(
         }
     };
 
-    let sender_methods: Vec<TokenStream> = commands
+    let mut sender_methods: Vec<TokenStream> = commands
         .iter()
         .enumerate()
         .map(|(idx, cmd)| {
@@ -480,6 +759,48 @@ fn generate_command_infra(
             }
         })
         .collect();
+    sender_methods.extend(ops.iter().enumerate().map(|(i, op)| {
+        let idx = commands.len() + i;
+        let method = &op.method_name;
+        let variant = &op.variant_name;
+        let reason_ty = &op.reason_ty;
+        let param_decls: Vec<TokenStream> = op
+            .params
+            .iter()
+            .map(|(name, ty)| quote! { #name: #ty })
+            .collect();
+        let param_names: Vec<_> = op.params.iter().map(|(name, _)| name).collect();
+
+        // If the send fails (service gone, queue closed), the dropped
+        // resolver concludes the operation as Lost.
+        let build_command = match &op.kind {
+            OpKind::Immediate => quote! {
+                #command_enum_name::#variant(#(#param_names,)* __resolver)
+            },
+            OpKind::Deferred(_) => quote! {
+                #command_enum_name::#variant(
+                    #struct_name::#method(#(#param_names),*),
+                    __resolver,
+                )
+            },
+        };
+
+        quote! {
+            /// Enqueues the operation and returns the handle its outcome
+            /// lands on.
+            pub fn #method(&self, #(#param_decls),*) -> rillet::op::Op<#reason_ty> {
+                let (__op, __resolver) = rillet::op::Op::<#reason_ty>::__rillet_pair();
+                if rillet::runtime::send_command(
+                    &self.cmd_tx,
+                    #build_command,
+                    stringify!(#method),
+                ) {
+                    self.metrics.inc_enqueued(#idx);
+                }
+                __op
+            }
+        }
+    }));
 
     let handle_impl = quote! {
         impl #handle_name {
@@ -509,11 +830,55 @@ fn generate_command_infra(
     (command_enum, execute_impl, handle_impl, metrics_impl)
 }
 
+/// Generate the keyed conclusion methods for deferred ops:
+/// `succeed_<op>` and `fail_<op>` on the service.
+fn generate_op_conclusions(struct_name: &Ident, ops: &[OpMethod]) -> TokenStream {
+    let methods: Vec<TokenStream> = ops
+        .iter()
+        .filter_map(|op| {
+            let OpKind::Deferred(deferred) = &op.kind else {
+                return None;
+            };
+            let key_ty = &deferred.key_ty;
+            let name_str = op.method_name.to_string();
+            let reason_ty = &op.reason_ty;
+            let succeed_name = format_ident!("succeed_{}", op.method_name);
+            let fail_name = format_ident!("fail_{}", op.method_name);
+            Some(quote! {
+                /// Concludes the operation under this key successfully;
+                /// without one, does nothing.
+                fn #succeed_name(&self, key: &#key_ty) {
+                    self.__rillet_ops.succeed::<#key_ty, #reason_ty>(#name_str, key);
+                }
+
+                /// Concludes the operation under this key unsuccessfully;
+                /// without one, does nothing.
+                fn #fail_name(&self, key: &#key_ty, reason: #reason_ty) {
+                    self.__rillet_ops.fail::<#key_ty, #reason_ty>(#name_str, key, reason);
+                }
+            })
+        })
+        .collect();
+
+    if methods.is_empty() {
+        return quote! {};
+    }
+
+    quote! {
+        impl #struct_name {
+            #(#methods)*
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_spawn_impl(
     struct_name: &Ident,
     handle_name: &Ident,
     command_enum_name: &Ident,
-    commands: &[CommandMethod],
+    has_commands: bool,
+    cmd_count: usize,
+    has_deferred_ops: bool,
     event_handlers: &[EventHandler],
     watch_handlers: &[WatchHandler],
     tasks: &[TaskMethod],
@@ -589,6 +954,7 @@ fn generate_spawn_impl(
                                 let mut s = state.write().expect("service state poisoned by a panicked handler");
                                 s.#method(event);
                                 s.__rillet_publish_view();
+                                s.__rillet_ops.flush_conclusions();
                             }
                             #exit_check
                         }
@@ -610,6 +976,7 @@ fn generate_spawn_impl(
                     let mut s = state.write().expect("service state poisoned by a panicked handler");
                     s.#method(view);
                     s.__rillet_publish_view();
+                    s.__rillet_ops.flush_conclusions();
                 }
                 #exit_check
             }
@@ -648,7 +1015,6 @@ fn generate_spawn_impl(
         }
     }));
 
-    let has_commands = !commands.is_empty();
     let has_events = !event_handlers.is_empty() || !watch_handlers.is_empty();
 
     // The command body and the view republication run under one write lock
@@ -659,6 +1025,7 @@ fn generate_spawn_impl(
             let mut s = state.write().expect("service state poisoned by a panicked handler");
             cmd.execute(&mut s);
             s.__rillet_publish_view();
+            s.__rillet_ops.flush_conclusions();
 
             s.__rillet_sampling_state.inc_command();
             if s.__rillet_sampling_state.should_sample() {
@@ -775,14 +1142,13 @@ fn generate_spawn_impl(
         }
     };
 
-    let cmd_count = commands.len();
-
     if has_context_tasks {
         generate_spawn_with_builder(
             struct_name,
             handle_name,
             command_enum_name,
             cmd_count,
+            has_deferred_ops,
             tasks,
             &event_receiver_setup,
             &service_loop,
@@ -793,6 +1159,7 @@ fn generate_spawn_impl(
             handle_name,
             command_enum_name,
             cmd_count,
+            has_deferred_ops,
             tasks,
             &event_receiver_setup,
             &service_loop,
@@ -808,9 +1175,22 @@ fn generate_spawn_core(
     handle_name: &Ident,
     command_enum_name: &Ident,
     cmd_count: usize,
+    has_deferred_ops: bool,
     event_receiver_setup: &[TokenStream],
     service_loop: &TokenStream,
 ) -> TokenStream {
+    let expiry_spawn = if has_deferred_ops {
+        quote! {
+            {
+                let cancel_token = cancel_token.clone();
+                let expiry_handle = spawner.spawn(rillet::op::expire_loop(__ops_cell, cancel_token));
+                join_handles.push(Box::new(expiry_handle));
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         impl #struct_name {
             /// Spawns the service loop; the caller spawns the tasks.
@@ -823,6 +1203,7 @@ fn generate_spawn_core(
 
                 self.__rillet_seed_view();
                 let __rillet_view = self.__rillet_view_slot_any();
+                let __ops_cell = self.__rillet_ops.clone();
 
                 #(#event_receiver_setup)*
 
@@ -841,6 +1222,8 @@ fn generate_spawn_core(
                     });
                     join_handles.push(Box::new(main_loop_handle));
                 }
+
+                #expiry_spawn
 
                 (
                     #handle_name {
@@ -873,11 +1256,13 @@ fn generate_handle_task_spawn(struct_name: &Ident, method_name: &Ident) -> Token
 }
 
 /// Generate the plain spawn methods, used when every task is handle-only.
+#[allow(clippy::too_many_arguments)]
 fn generate_spawn_simple(
     struct_name: &Ident,
     handle_name: &Ident,
     command_enum_name: &Ident,
     cmd_count: usize,
+    has_deferred_ops: bool,
     tasks: &[TaskMethod],
     event_receiver_setup: &[TokenStream],
     service_loop: &TokenStream,
@@ -887,6 +1272,7 @@ fn generate_spawn_simple(
         handle_name,
         command_enum_name,
         cmd_count,
+        has_deferred_ops,
         event_receiver_setup,
         service_loop,
     );
@@ -936,11 +1322,13 @@ fn generate_spawn_simple(
 }
 
 /// Generate the spawn builder, used when any task has extra parameters.
+#[allow(clippy::too_many_arguments)]
 fn generate_spawn_with_builder(
     struct_name: &Ident,
     handle_name: &Ident,
     command_enum_name: &Ident,
     cmd_count: usize,
+    has_deferred_ops: bool,
     tasks: &[TaskMethod],
     event_receiver_setup: &[TokenStream],
     service_loop: &TokenStream,
@@ -1123,6 +1511,7 @@ fn generate_spawn_with_builder(
         handle_name,
         command_enum_name,
         cmd_count,
+        has_deferred_ops,
         event_receiver_setup,
         service_loop,
     );
@@ -1243,6 +1632,7 @@ fn generate_direct_mut_methods(
                     let mut s = self.state.write().expect("service state poisoned by a panicked handler");
                     let result = s.#method_name(#(#param_names),*);
                     s.__rillet_publish_view();
+                    s.__rillet_ops.flush_conclusions();
                     result
                 }
             }
