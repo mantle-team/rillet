@@ -265,3 +265,16 @@ fn subscribers_see_end_of_stream_after_the_emitter_stops() {
         None
     );
 }
+
+#[test]
+#[should_panic(expected = "event queue full")]
+fn an_undrained_subscriber_panics_the_service_on_emit() {
+    let bird = QuietBird::new().spawn();
+    let _chirps = bird.on_chirp();
+
+    bird.chirp();
+    bird.chirp();
+    bird.chirp();
+
+    bird.cancel().wait();
+}
