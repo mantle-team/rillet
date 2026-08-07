@@ -245,16 +245,11 @@ fn op_sent_to_a_cancelled_service_is_lost() {
 }
 
 #[test]
-fn parked_op_is_lost_when_the_last_handle_drops() {
+fn parked_op_is_lost_when_the_service_shuts_down() {
     let courier = Courier::new().spawn();
     let op = courier.send(1, far());
     courier.cancel().wait();
-
-    // Cancellation alone leaves the parked operation pending.
-    assert!(op.state().is_pending());
-
-    drop(courier);
-    assert!(matches!(*block_on(op.concluded()), OpState::Lost { .. }));
+    assert!(matches!(*op.state(), OpState::Lost { .. }));
 }
 
 #[test]

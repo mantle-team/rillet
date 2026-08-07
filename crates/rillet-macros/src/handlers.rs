@@ -1095,6 +1095,11 @@ fn generate_spawn_impl(
                     #(#event_select_arms)*
                 }
             }
+            state
+                .read()
+                .expect("service state poisoned by a panicked handler")
+                .__rillet_ops
+                .close();
         }
     } else if has_events {
         quote! {
