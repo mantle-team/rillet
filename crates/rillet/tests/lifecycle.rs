@@ -67,6 +67,23 @@ impl Audit {
     }
 }
 
+#[rillet::service]
+pub struct Blocker {
+    entered: Arc<AtomicBool>,
+    gate: Arc<AtomicBool>,
+}
+
+#[rillet::handlers]
+impl Blocker {
+    #[rillet(command)]
+    fn block(&mut self) {
+        self.entered.store(true, Ordering::SeqCst);
+        while !self.gate.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
 /// Runs the wait on another thread, panicking after five seconds.
 fn assert_stops(what: &str, wait: impl FnOnce() + Send + 'static) {
     let done = Arc::new(AtomicBool::new(false));
@@ -113,6 +130,34 @@ fn subscribed_relay_outlives_its_handles_then_stops_unsubscribed() {
         completion.wait()
     });
     ticker.cancel();
+}
+
+#[test]
+fn cancellation_is_delivered_while_a_handler_holds_the_state_lock() {
+    let entered = Arc::new(AtomicBool::new(false));
+    let gate = Arc::new(AtomicBool::new(false));
+    let blocker = Blocker::new(entered.clone(), gate.clone()).spawn();
+
+    blocker.block();
+    wait_for("the handler to hold the state lock", || {
+        entered.load(Ordering::SeqCst)
+    });
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let flag = cancelled.clone();
+    let handle = blocker.clone();
+    let waiter = std::thread::spawn(move || {
+        let completion = handle.cancel();
+        flag.store(true, Ordering::SeqCst);
+        completion.wait();
+    });
+
+    wait_for("cancel to return while the handler is blocked", || {
+        cancelled.load(Ordering::SeqCst)
+    });
+
+    gate.store(true, Ordering::SeqCst);
+    waiter.join().unwrap();
 }
 
 #[test]

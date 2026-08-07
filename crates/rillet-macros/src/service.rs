@@ -695,21 +695,21 @@ fn generate_shutdown_method(handle_name: &Ident) -> TokenStream {
         impl #handle_name {
             /// Returns the service's cancellation token.
             pub fn cancel_token(&self) -> rillet::runtime::CancellationToken {
-                self.state.read().unwrap().__rillet_cancel_token.clone()
+                self.__rillet_cancel_token.clone()
             }
 
             /// Signals cancellation to the service loop and its tasks.
             ///
             /// The returned completion waits for them to finish.
             pub fn cancel(&self) -> rillet::runtime::TaskCompletion {
-                self.state.read().unwrap().__rillet_cancel_token.cancel();
+                self.__rillet_cancel_token.cancel();
                 self.task_completion()
             }
 
             /// Returns a completion for the service's tasks without
             /// cancelling them.
             pub fn task_completion(&self) -> rillet::runtime::TaskCompletion {
-                rillet::runtime::TaskCompletion::new(self.state.read().unwrap().__rillet_join_handles.clone())
+                rillet::runtime::TaskCompletion::new(self.__rillet_join_handles.clone())
             }
         }
     }

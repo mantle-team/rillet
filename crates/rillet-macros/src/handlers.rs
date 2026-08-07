@@ -164,6 +164,8 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             cmd_tx: rillet::runtime::mpsc::Sender<#command_enum_name>,
             metrics: rillet::runtime::Arc<rillet::metrics::CommandMetrics<#cmd_count>>,
             __rillet_view: Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>>,
+            __rillet_cancel_token: rillet::runtime::CancellationToken,
+            __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::Mutex<Vec<Box<dyn rillet::runtime::TaskHandle>>>>,
         }
     };
 
@@ -814,6 +816,8 @@ fn generate_spawn_core(
                         cmd_tx,
                         metrics,
                         __rillet_view,
+                        __rillet_cancel_token: cancel_token,
+                        __rillet_join_handles: join_handles.clone(),
                     },
                     join_handles,
                 )
