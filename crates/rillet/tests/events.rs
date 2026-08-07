@@ -245,3 +245,23 @@ fn one_loop_runs_multiple_event_handlers() {
     macaw.cancel();
     bird.cancel();
 }
+
+#[test]
+fn subscribers_see_end_of_stream_after_the_emitter_stops() {
+    let bird = Bird::new().spawn();
+    let mut chirps = bird.on_chirp();
+
+    bird.chirp(2);
+    assert_eq!(
+        wait_on("chirp before shutdown", chirps.next()).map(|c| c.loudness),
+        Some(2)
+    );
+
+    bird.cancel().wait();
+    drop(bird);
+
+    assert_eq!(
+        wait_on("end of stream", chirps.next()).map(|c| c.loudness),
+        None
+    );
+}
