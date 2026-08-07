@@ -261,6 +261,27 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
         })?;
     }
 
+    let claimed: Vec<&str> = [
+        (attrs.is_command, "command"),
+        (attrs.is_direct, "direct"),
+        (attrs.is_direct_mut, "direct_mut"),
+        (attrs.is_task, "task"),
+        (attrs.from_field.is_some(), "from"),
+        (attrs.watch_field.is_some(), "watch"),
+    ]
+    .into_iter()
+    .filter_map(|(set, name)| set.then_some(name))
+    .collect();
+    if claimed.len() > 1 {
+        return Err(Error::new_spanned(
+            &method.sig,
+            format!(
+                "a rillet method can have only one role; found `{}`",
+                claimed.join("`, `")
+            ),
+        ));
+    }
+
     Ok(attrs)
 }
 
@@ -1150,5 +1171,45 @@ fn generate_direct_mut_methods(
         impl #handle_name {
             #(#handle_methods)*
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_method_attrs;
+    use syn::parse_quote;
+
+    #[test]
+    fn combined_role_conflict_is_rejected() {
+        let method: syn::ImplItemFn = parse_quote! {
+            #[rillet(command, direct)]
+            fn clear(&mut self) {}
+        };
+        let err = parse_method_attrs(&method)
+            .err()
+            .expect("conflict must be rejected");
+        assert!(err.to_string().contains("`command`, `direct`"));
+    }
+
+    #[test]
+    fn stacked_role_conflict_is_rejected() {
+        let method: syn::ImplItemFn = parse_quote! {
+            #[rillet(task)]
+            #[rillet(from = bird)]
+            fn feed(&mut self) {}
+        };
+        let err = parse_method_attrs(&method)
+            .err()
+            .expect("conflict must be rejected");
+        assert!(err.to_string().contains("only one role"));
+    }
+
+    #[test]
+    fn single_role_is_accepted() {
+        let method: syn::ImplItemFn = parse_quote! {
+            #[rillet(command)]
+            fn clear(&mut self) {}
+        };
+        assert!(parse_method_attrs(&method).is_ok());
     }
 }
