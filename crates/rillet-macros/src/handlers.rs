@@ -165,7 +165,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             metrics: rillet::runtime::Arc<rillet::metrics::CommandMetrics<#cmd_count>>,
             __rillet_view: Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>>,
             __rillet_cancel_token: rillet::runtime::CancellationToken,
-            __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::Mutex<Vec<Box<dyn rillet::runtime::TaskHandle>>>>,
+            __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::TaskSet>,
         }
     };
 
@@ -803,7 +803,7 @@ fn generate_spawn_core(
     quote! {
         impl #struct_name {
             /// Spawns the service loop; the caller spawns the tasks.
-            fn __rillet_spawn_core_with<__S: rillet::runtime::Spawner>(mut self, spawner: &__S) -> (#handle_name, rillet::runtime::Arc<rillet::runtime::Mutex<Vec<Box<dyn rillet::runtime::TaskHandle>>>>) {
+            fn __rillet_spawn_core_with<__S: rillet::runtime::Spawner>(mut self, spawner: &__S) -> (#handle_name, rillet::runtime::Arc<rillet::runtime::TaskSet>) {
                 let (cmd_tx, cmd_rx) = rillet::runtime::mpsc::bounded::<#command_enum_name>(#struct_name::__RILLET_COMMAND_CAPACITY);
 
                 let metrics = rillet::runtime::Arc::new(
@@ -828,7 +828,7 @@ fn generate_spawn_core(
                     let main_loop_handle = spawner.spawn(async move {
                         #service_loop
                     });
-                    join_handles.lock().unwrap().push(Box::new(main_loop_handle));
+                    join_handles.push(Box::new(main_loop_handle));
                 }
 
                 (
@@ -856,7 +856,7 @@ fn generate_handle_task_spawn(struct_name: &Ident, method_name: &Ident) -> Token
             let task_handle = spawner.spawn(async move {
                 #struct_name::#method_name(handle, cancel_token).await;
             });
-            join_handles.lock().unwrap().push(Box::new(task_handle));
+            join_handles.push(Box::new(task_handle));
         }
     }
 }
@@ -1031,7 +1031,7 @@ fn generate_spawn_with_builder(
                         let task_handle = spawner.spawn(async move {
                             #struct_name::#method_name(handle, cancel_token, #(#param_names),*).await;
                         });
-                        join_handles.lock().unwrap().push(Box::new(task_handle));
+                        join_handles.push(Box::new(task_handle));
                     }
                 }
             }

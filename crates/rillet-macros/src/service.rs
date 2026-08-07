@@ -267,7 +267,7 @@ fn inject_cancel_token_field(fields: &mut FieldsNamed) {
 fn inject_join_handles_field(fields: &mut FieldsNamed) {
     let join_handles_field: syn::Field = syn::parse_quote! {
         #[doc(hidden)]
-        __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::Mutex<Vec<Box<dyn rillet::runtime::TaskHandle>>>>
+        __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::TaskSet>
     };
     fields.named.push(join_handles_field);
 }
@@ -491,7 +491,7 @@ fn generate_constructor(
                     #emitter_init
                     #view_init
                     __rillet_cancel_token: rillet::runtime::CancellationToken::new(),
-                    __rillet_join_handles: rillet::runtime::Arc::new(rillet::runtime::Mutex::new(Vec::new())),
+                    __rillet_join_handles: rillet::runtime::Arc::new(rillet::runtime::TaskSet::new()),
                     __rillet_sampling_state: rillet::metrics::SamplingState::new(),
                 }
             }

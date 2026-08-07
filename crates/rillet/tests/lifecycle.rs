@@ -161,6 +161,65 @@ fn cancellation_is_delivered_while_a_handler_holds_the_state_lock() {
 }
 
 #[test]
+fn concurrent_waiters_all_block_until_tasks_finish() {
+    let entered = Arc::new(AtomicBool::new(false));
+    let gate = Arc::new(AtomicBool::new(false));
+    let blocker = Blocker::new(entered.clone(), gate.clone()).spawn();
+
+    blocker.block();
+    wait_for("the handler to hold the state lock", || {
+        entered.load(Ordering::SeqCst)
+    });
+
+    let first = blocker.cancel();
+    let second = blocker.task_completion();
+    let flags = [
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ];
+    let waiters: Vec<_> = [first, second]
+        .into_iter()
+        .zip(flags.clone())
+        .map(|(completion, flag)| {
+            std::thread::spawn(move || {
+                completion.wait();
+                flag.store(true, Ordering::SeqCst);
+            })
+        })
+        .collect();
+
+    // With the handler still gated, neither waiter may return.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert!(flags.iter().all(|flag| !flag.load(Ordering::SeqCst)));
+
+    gate.store(true, Ordering::SeqCst);
+    for waiter in waiters {
+        waiter.join().unwrap();
+    }
+    assert!(flags.iter().all(|flag| flag.load(Ordering::SeqCst)));
+}
+
+#[test]
+fn dropped_joined_completion_does_not_abort_services() {
+    let first = Counter::new().spawn();
+    let second = Counter::new().spawn();
+
+    drop(rillet::runtime::TaskCompletion::join([
+        first.task_completion(),
+        second.task_completion(),
+    ]));
+
+    first.increment();
+    second.increment();
+    wait_for("both services to keep processing", || {
+        first.count() == 1 && second.count() == 1
+    });
+
+    first.cancel();
+    second.cancel();
+}
+
+#[test]
 fn unobserved_event_handler_service_stops_when_its_handles_drop() {
     let ticker = Ticker::new().spawn();
     let audit = Audit::new(ticker.clone()).spawn();
