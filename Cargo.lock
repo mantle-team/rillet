@@ -3426,7 +3426,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "rillet"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "arc-swap",
  "async-broadcast",
@@ -3443,7 +3443,7 @@ dependencies = [
 
 [[package]]
 name = "rillet-macros"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "proc-macro2",
  "quote",

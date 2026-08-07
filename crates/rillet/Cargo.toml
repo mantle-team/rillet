@@ -17,7 +17,7 @@ name = "blessed_types"
 required-features = ["im", "smol-str"]
 
 [dependencies]
-rillet-macros = { path = "../rillet-macros", version = "0.0.1" }
+rillet-macros = { path = "../rillet-macros", version = "0.0.2" }
 
 arc-swap = "1"
 event-listener = "5"
