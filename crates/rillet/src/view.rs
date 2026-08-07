@@ -256,6 +256,21 @@ mod tests {
     }
 
     #[test]
+    fn watcher_count_tracks_watch_and_drop() {
+        let slot = ViewSlot::new(0u32);
+        assert_eq!(slot.watcher_count(), 0);
+
+        let first = slot.watch();
+        let second = slot.watch();
+        assert_eq!(slot.watcher_count(), 2);
+
+        drop(first);
+        assert_eq!(slot.watcher_count(), 1);
+        drop(second);
+        assert_eq!(slot.watcher_count(), 0);
+    }
+
+    #[test]
     fn changed_wakes_across_threads() {
         let slot = ViewSlot::new(0u32);
         let mut watcher = slot.watch();

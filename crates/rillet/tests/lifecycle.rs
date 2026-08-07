@@ -232,3 +232,44 @@ fn unobserved_event_handler_service_stops_when_its_handles_drop() {
     });
     ticker.cancel();
 }
+
+#[test]
+fn a_cloned_cancel_token_stops_the_service() {
+    let counter = Counter::new().spawn();
+    let token = counter.cancel_token();
+    let completion = counter.task_completion();
+
+    token.cancel();
+
+    assert_stops("service to stop via a token clone", move || {
+        completion.wait()
+    });
+}
+
+#[rillet::service]
+pub struct Faulty {
+    #[rillet(get, default)]
+    value: u32,
+}
+
+#[rillet::handlers]
+impl Faulty {
+    #[rillet(command)]
+    fn detonate(&mut self) {
+        panic!("handler exploded");
+    }
+}
+
+#[test]
+#[should_panic(expected = "service state poisoned by a panicked handler")]
+fn state_access_after_a_handler_panic_names_the_cause() {
+    let faulty = Faulty::new().spawn();
+    let completion = faulty.task_completion();
+
+    faulty.detonate();
+    let handler_panic =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion.wait()));
+    assert!(handler_panic.is_err());
+
+    faulty.value();
+}

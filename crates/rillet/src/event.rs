@@ -204,6 +204,29 @@ mod tests {
     struct Ping(u32);
     impl Event for Ping {}
 
+    #[derive(Clone, Debug, PartialEq)]
+    struct Pong(u32);
+    impl Event for Pong {}
+
+    #[test]
+    fn total_subscribers_spans_event_types() {
+        let mut builder = EmitterBuilder::new();
+        builder.add_event::<Ping>(4);
+        builder.add_event::<Pong>(4);
+        let emitter = builder.build();
+        assert_eq!(emitter.total_subscribers(), 0);
+
+        let first = emitter.subscribe::<Ping>();
+        let second = emitter.subscribe::<Pong>();
+        let third = emitter.subscribe::<Ping>();
+        assert_eq!(emitter.total_subscribers(), 3);
+
+        drop(second);
+        assert_eq!(emitter.total_subscribers(), 2);
+        drop((first, third));
+        assert_eq!(emitter.total_subscribers(), 0);
+    }
+
     #[test]
     fn emits_beyond_capacity_reach_late_subscribers() {
         let mut builder = EmitterBuilder::new();
