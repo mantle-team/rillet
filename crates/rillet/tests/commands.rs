@@ -127,4 +127,7 @@ fn commands_after_cancel_are_dropped_silently() {
     // The channel is closed; sending must neither panic nor deliver.
     ledger.record(1);
     assert_eq!(ledger.entries().len(), 0);
+    // A dropped command counts as neither enqueued nor queued depth.
+    assert_eq!(ledger.aggregate_stats().total_enqueued, 0);
+    assert_eq!(ledger.aggregate_stats().depth, 0);
 }

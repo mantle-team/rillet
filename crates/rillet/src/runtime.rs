@@ -7,15 +7,16 @@ pub use futures;
 pub use futures::FutureExt;
 pub use std::sync::{Arc, Mutex, RwLock};
 
-/// Send a command from a generated handle method.
+/// Send a command from a generated handle method, returning whether it
+/// was delivered.
 ///
 /// Panics when the queue is full; a send after the service has shut down
-/// is a no-op.
-pub fn send_command<C>(tx: &mpsc::Sender<C>, command: C, method: &'static str) {
+/// is a no-op returning false.
+pub fn send_command<C>(tx: &mpsc::Sender<C>, command: C, method: &'static str) -> bool {
     match tx.try_send(command) {
-        Ok(()) => {}
+        Ok(()) => true,
         // The service has shut down; the command is dropped.
-        Err(mpsc::TrySendError::Closed(_)) => {}
+        Err(mpsc::TrySendError::Closed(_)) => false,
         Err(mpsc::TrySendError::Full(_)) => {
             panic!("command queue full: {method}");
         }
@@ -69,7 +70,7 @@ mod tests {
     #[test]
     fn delivers_when_open() {
         let (tx, rx) = mpsc::bounded(1);
-        send_command(&tx, 7, "do_thing");
+        assert!(send_command(&tx, 7, "do_thing"));
         assert_eq!(rx.try_recv(), Ok(7));
     }
 
@@ -77,7 +78,7 @@ mod tests {
     fn drops_when_closed() {
         let (tx, rx) = mpsc::bounded(1);
         drop(rx);
-        send_command(&tx, 7, "do_thing");
+        assert!(!send_command(&tx, 7, "do_thing"));
     }
 
     #[test]

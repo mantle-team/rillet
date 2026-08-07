@@ -416,12 +416,13 @@ fn generate_command_infra(
             if cmd.params.is_empty() {
                 quote! {
                     pub fn #method(&self) {
-                        self.metrics.inc_enqueued(#idx);
-                        rillet::runtime::send_command(
+                        if rillet::runtime::send_command(
                             &self.cmd_tx,
                             #command_enum_name::#variant,
                             stringify!(#method),
-                        );
+                        ) {
+                            self.metrics.inc_enqueued(#idx);
+                        }
                     }
                 }
             } else {
@@ -433,12 +434,13 @@ fn generate_command_infra(
                 let param_names: Vec<_> = cmd.params.iter().map(|(name, _)| name).collect();
                 quote! {
                     pub fn #method(&self, #(#param_decls),*) {
-                        self.metrics.inc_enqueued(#idx);
-                        rillet::runtime::send_command(
+                        if rillet::runtime::send_command(
                             &self.cmd_tx,
                             #command_enum_name::#variant(#(#param_names),*),
                             stringify!(#method),
-                        );
+                        ) {
+                            self.metrics.inc_enqueued(#idx);
+                        }
                     }
                 }
             }
