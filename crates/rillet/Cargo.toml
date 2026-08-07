@@ -23,9 +23,11 @@ arc-swap = "1"
 event-listener = "5"
 smol = "2"
 futures-lite = "2"
-async-io = "2"
 async-channel = "2"
 async-broadcast = "0.7"
 futures = "0.3"
 im = { version = "15", optional = true }
 smol_str = { version = "0.3", optional = true }
+
+[dev-dependencies]
+async-io = "2"

@@ -68,16 +68,6 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    /// Creates a new empty emitter.
-    pub fn new() -> Self {
-        Self {
-            senders: Arc::new(HashMap::new()),
-            published_counts: Arc::new(HashMap::new()),
-            subscriber_counters: Arc::new(Vec::new()),
-            _inactive_receivers: Arc::new(Vec::new()),
-        }
-    }
-
     /// Creates an emitter with pre-registered senders.
     #[doc(hidden)]
     pub fn with_senders(
@@ -150,12 +140,6 @@ impl Emitter {
             .iter()
             .map(|counter| counter())
             .sum()
-    }
-}
-
-impl Default for Emitter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

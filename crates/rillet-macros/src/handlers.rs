@@ -344,19 +344,6 @@ fn generate_command_infra(
         })
         .collect();
 
-    let name_arms: Vec<TokenStream> = commands
-        .iter()
-        .map(|cmd| {
-            let variant = &cmd.variant_name;
-            let name = cmd.method_name.to_string();
-            if cmd.params.is_empty() {
-                quote! { Self::#variant => #name, }
-            } else {
-                quote! { Self::#variant(..) => #name, }
-            }
-        })
-        .collect();
-
     let names: Vec<String> = commands
         .iter()
         .map(|cmd| cmd.method_name.to_string())
@@ -372,16 +359,6 @@ fn generate_command_infra(
         }
     };
 
-    let name_body = if commands.is_empty() {
-        quote! { unreachable!("empty command enum cannot be instantiated") }
-    } else {
-        quote! {
-            match self {
-                #(#name_arms)*
-            }
-        }
-    };
-
     let command_enum = quote! {
         #[allow(clippy::enum_variant_names, clippy::module_name_repetitions)]
         enum #command_enum_name {
@@ -389,9 +366,6 @@ fn generate_command_infra(
         }
 
         impl #command_enum_name {
-            /// Number of command variants.
-            const COUNT: usize = #cmd_count;
-
             /// Array of command names for metrics.
             const NAMES: [&'static str; #cmd_count] = [#(#names),*];
 
@@ -399,12 +373,6 @@ fn generate_command_infra(
             #[inline]
             fn index(&self) -> usize {
                 #index_body
-            }
-
-            /// Returns the name of this command variant.
-            #[inline]
-            fn name(&self) -> &'static str {
-                #name_body
             }
         }
     };

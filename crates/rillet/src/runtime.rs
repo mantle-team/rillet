@@ -2,9 +2,7 @@
 
 pub use crate::CancellationToken;
 pub use crate::{SmolSpawner, Spawner, TaskHandle};
-pub use async_broadcast as broadcast;
 pub use async_channel as mpsc;
-pub use async_io::Timer;
 pub use futures;
 pub use futures::FutureExt;
 pub use std::sync::{Arc, Mutex, RwLock};
