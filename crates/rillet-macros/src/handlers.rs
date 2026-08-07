@@ -184,6 +184,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         &handle_name,
         &command_methods,
         &op_methods,
+        cmd_count,
     );
     let op_conclusions = generate_op_conclusions(&struct_name, &op_methods);
 
@@ -202,21 +203,20 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         }
     };
 
-    let has_commands = !command_methods.is_empty() || !op_methods.is_empty();
     let has_deferred_ops = op_methods
         .iter()
         .any(|op| matches!(op.kind, OpKind::Deferred(_)));
-    let spawn_impl = generate_spawn_impl(
-        &struct_name,
-        &handle_name,
-        &command_enum_name,
-        has_commands,
+    let spawn_impl = generate_spawn_impl(&SpawnInputs {
+        struct_name: &struct_name,
+        handle_name: &handle_name,
+        command_enum_name: &command_enum_name,
+        has_commands: !command_methods.is_empty() || !op_methods.is_empty(),
         cmd_count,
         has_deferred_ops,
-        &event_handlers,
-        &watch_handlers,
-        &task_methods,
-    );
+        event_handlers: &event_handlers,
+        watch_handlers: &watch_handlers,
+        tasks: &task_methods,
+    });
 
     let direct_impl = generate_direct_methods(&struct_name, &handle_name, &direct_methods);
     let direct_mut_impl =
@@ -446,14 +446,13 @@ fn parse_op_method(method: &ImplItemFn, attr: OpAttr) -> Result<OpMethod> {
     }
 }
 
-/// Extracts `(K, R)` from an enqueue fn's `-> Start<K, R>` return type.
-fn extract_start_types(output: &syn::ReturnType) -> Result<(Type, Type)> {
-    let err = || {
-        Error::new_spanned(
-            output,
-            "a deferred op's enqueue fn must return `Start<Key, Reason>`",
-        )
-    };
+/// Extracts the two generic type arguments of a `Name<A, B>` return type.
+fn extract_return_type_args(
+    output: &syn::ReturnType,
+    name: &str,
+    message: &str,
+) -> Result<(Type, Type)> {
+    let err = || Error::new_spanned(output, message);
     let syn::ReturnType::Type(_, ty) = output else {
         return Err(err());
     };
@@ -461,7 +460,7 @@ fn extract_start_types(output: &syn::ReturnType) -> Result<(Type, Type)> {
         return Err(err());
     };
     let segment = path.path.segments.last().ok_or_else(err)?;
-    if segment.ident != "Start" {
+    if segment.ident != name {
         return Err(err());
     }
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
@@ -476,51 +475,29 @@ fn extract_start_types(output: &syn::ReturnType) -> Result<(Type, Type)> {
         })
         .collect();
     match types.as_slice() {
-        [key_ty, reason_ty] => Ok(((*key_ty).clone(), (*reason_ty).clone())),
+        [first, second] => Ok(((*first).clone(), (*second).clone())),
         _ => Err(err()),
     }
+}
+
+/// Extracts `(K, R)` from an enqueue fn's `-> Start<K, R>` return type.
+fn extract_start_types(output: &syn::ReturnType) -> Result<(Type, Type)> {
+    extract_return_type_args(
+        output,
+        "Start",
+        "a deferred op's enqueue fn must return `Start<Key, Reason>`",
+    )
 }
 
 /// Extracts `R` from an immediate op handler's `-> Result<(), R>` return
 /// type.
 fn extract_result_reason(output: &syn::ReturnType) -> Result<Type> {
-    let err = || {
-        Error::new_spanned(
-            output,
-            "an immediate op handler must return `Result<(), Reason>`",
-        )
-    };
-    let syn::ReturnType::Type(_, ty) = output else {
-        return Err(err());
-    };
-    let Type::Path(path) = &**ty else {
-        return Err(err());
-    };
-    let segment = path.path.segments.last().ok_or_else(err)?;
-    if segment.ident != "Result" {
-        return Err(err());
+    let message = "an immediate op handler must return `Result<(), Reason>`";
+    let (ok_ty, reason_ty) = extract_return_type_args(output, "Result", message)?;
+    if !matches!(&ok_ty, Type::Tuple(tuple) if tuple.elems.is_empty()) {
+        return Err(Error::new_spanned(output, message));
     }
-    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return Err(err());
-    };
-    let types: Vec<&Type> = args
-        .args
-        .iter()
-        .filter_map(|arg| match arg {
-            syn::GenericArgument::Type(ty) => Some(ty),
-            _ => None,
-        })
-        .collect();
-    match types.as_slice() {
-        [ok_ty, reason_ty] => {
-            let is_unit = matches!(ok_ty, Type::Tuple(tuple) if tuple.elems.is_empty());
-            if !is_unit {
-                return Err(err());
-            }
-            Ok((*reason_ty).clone())
-        }
-        _ => Err(err()),
-    }
+    Ok(reason_ty)
 }
 
 /// Derives the subscription method name from the event type, MessageSent
@@ -560,9 +537,8 @@ fn generate_command_infra(
     handle_name: &Ident,
     commands: &[CommandMethod],
     ops: &[OpMethod],
+    cmd_count: usize,
 ) -> (TokenStream, TokenStream, TokenStream, TokenStream) {
-    let cmd_count = commands.len() + ops.len();
-
     let mut enum_variants: Vec<TokenStream> = commands
         .iter()
         .map(|cmd| {
@@ -575,21 +551,6 @@ fn generate_command_infra(
             }
         })
         .collect();
-    enum_variants.extend(ops.iter().map(|op| {
-        let variant = &op.variant_name;
-        let reason_ty = &op.reason_ty;
-        match &op.kind {
-            OpKind::Immediate => {
-                let types: Vec<_> = op.params.iter().map(|(_, ty)| ty).collect();
-                quote! { #variant(#(#types,)* rillet::op::Resolver<#reason_ty>), }
-            }
-            OpKind::Deferred(deferred) => {
-                let key_ty = &deferred.key_ty;
-                quote! { #variant(#key_ty, rillet::op::Resolver<#reason_ty>), }
-            }
-        }
-    }));
-
     let mut index_arms: Vec<TokenStream> = commands
         .iter()
         .enumerate()
@@ -602,45 +563,10 @@ fn generate_command_infra(
             }
         })
         .collect();
-    index_arms.extend(ops.iter().enumerate().map(|(i, op)| {
-        let idx = commands.len() + i;
-        let variant = &op.variant_name;
-        quote! { Self::#variant(..) => #idx, }
-    }));
-
-    let names: Vec<String> = commands
+    let mut names: Vec<String> = commands
         .iter()
         .map(|cmd| cmd.method_name.to_string())
-        .chain(ops.iter().map(|op| op.method_name.to_string()))
         .collect();
-
-    let index_body = if commands.is_empty() && ops.is_empty() {
-        quote! { unreachable!("empty command enum cannot be instantiated") }
-    } else {
-        quote! {
-            match self {
-                #(#index_arms)*
-            }
-        }
-    };
-
-    let command_enum = quote! {
-        #[allow(clippy::enum_variant_names, clippy::module_name_repetitions)]
-        enum #command_enum_name {
-            #(#enum_variants)*
-        }
-
-        impl #command_enum_name {
-            /// Array of command names for metrics.
-            const NAMES: [&'static str; #cmd_count] = [#(#names),*];
-
-            /// Returns the index of this command variant.
-            #[inline]
-            fn index(&self) -> usize {
-                #index_body
-            }
-        }
-    };
 
     let mut match_arms: Vec<TokenStream> = commands
         .iter()
@@ -661,63 +587,6 @@ fn generate_command_infra(
             }
         })
         .collect();
-    match_arms.extend(ops.iter().map(|op| {
-        let variant = &op.variant_name;
-        let method = &op.method_name;
-        let name_str = op.method_name.to_string();
-        match &op.kind {
-            OpKind::Immediate => {
-                let param_names: Vec<_> = op
-                    .params
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| format_ident!("v{}", i))
-                    .collect();
-                quote! {
-                    #command_enum_name::#variant(#(#param_names,)* __resolver) => {
-                        match state.#method(#(#param_names),*) {
-                            Ok(()) => state
-                                .__rillet_ops
-                                .queue_conclusion(move || __resolver.succeed()),
-                            Err(__reason) => state
-                                .__rillet_ops
-                                .queue_conclusion(move || __resolver.fail(__reason)),
-                        }
-                    }
-                }
-            }
-            OpKind::Deferred(deferred) => {
-                let DeferredOp {
-                    execute,
-                    timeout,
-                    key_ty,
-                } = &**deferred;
-                let reason_ty = &op.reason_ty;
-                quote! {
-                    #command_enum_name::#variant(__key, __resolver) => {
-                        state.__rillet_ops.insert::<#key_ty, #reason_ty>(
-                            #name_str,
-                            __key.clone(),
-                            __resolver,
-                            || #timeout,
-                        );
-                        state.#execute(__key)
-                    }
-                }
-            }
-        }
-    }));
-
-    let execute_impl = quote! {
-        impl #command_enum_name {
-            fn execute(self, state: &mut #struct_name) {
-                match self {
-                    #(#match_arms)*
-                }
-            }
-        }
-    };
-
     let mut sender_methods: Vec<TokenStream> = commands
         .iter()
         .enumerate()
@@ -757,11 +626,20 @@ fn generate_command_infra(
             }
         })
         .collect();
-    sender_methods.extend(ops.iter().enumerate().map(|(i, op)| {
+    // Each op contributes one piece to every command-shaped collection:
+    // enum variant, index arm, metrics name, execute arm, and sender.
+    for (i, op) in ops.iter().enumerate() {
         let idx = commands.len() + i;
-        let method = &op.method_name;
         let variant = &op.variant_name;
+        let method = &op.method_name;
+        let name_str = op.method_name.to_string();
         let reason_ty = &op.reason_ty;
+        let arm_params: Vec<_> = op
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format_ident!("v{}", i))
+            .collect();
         let param_decls: Vec<TokenStream> = op
             .params
             .iter()
@@ -771,20 +649,66 @@ fn generate_command_infra(
 
         // If the send fails (service gone, queue closed), the dropped
         // resolver concludes the operation as Lost.
-        let build_pair_and_command = match &op.kind {
-            OpKind::Immediate => quote! {
-                let (__op, __resolver) = rillet::op::Op::<#reason_ty>::__rillet_pair(None);
-                let __command = #command_enum_name::#variant(#(#param_names,)* __resolver);
-            },
-            OpKind::Deferred(_) => quote! {
-                let (__key, __deadline) =
-                    #struct_name::#method(#(#param_names),*).__rillet_parts();
-                let (__op, __resolver) = rillet::op::Op::<#reason_ty>::__rillet_pair(__deadline);
-                let __command = #command_enum_name::#variant(__key, __resolver);
-            },
+        let (enum_variant, match_arm, build_pair_and_command) = match &op.kind {
+            OpKind::Immediate => {
+                let types: Vec<_> = op.params.iter().map(|(_, ty)| ty).collect();
+                (
+                    quote! { #variant(#(#types,)* rillet::op::Resolver<#reason_ty>), },
+                    quote! {
+                        #command_enum_name::#variant(#(#arm_params,)* __resolver) => {
+                            match state.#method(#(#arm_params),*) {
+                                Ok(()) => state
+                                    .__rillet_ops
+                                    .queue_conclusion(move || __resolver.succeed()),
+                                Err(__reason) => state
+                                    .__rillet_ops
+                                    .queue_conclusion(move || __resolver.fail(__reason)),
+                            }
+                        }
+                    },
+                    quote! {
+                        let (__op, __resolver) =
+                            rillet::op::Op::<#reason_ty>::__rillet_pair(None);
+                        let __command =
+                            #command_enum_name::#variant(#(#param_names,)* __resolver);
+                    },
+                )
+            }
+            OpKind::Deferred(deferred) => {
+                let DeferredOp {
+                    execute,
+                    timeout,
+                    key_ty,
+                } = &**deferred;
+                (
+                    quote! { #variant(#key_ty, rillet::op::Resolver<#reason_ty>), },
+                    quote! {
+                        #command_enum_name::#variant(__key, __resolver) => {
+                            state.__rillet_ops.insert::<#key_ty, #reason_ty>(
+                                #name_str,
+                                __key.clone(),
+                                __resolver,
+                                || #timeout,
+                            );
+                            state.#execute(__key)
+                        }
+                    },
+                    quote! {
+                        let (__key, __deadline) =
+                            #struct_name::#method(#(#param_names),*).__rillet_parts();
+                        let (__op, __resolver) =
+                            rillet::op::Op::<#reason_ty>::__rillet_pair(__deadline);
+                        let __command = #command_enum_name::#variant(__key, __resolver);
+                    },
+                )
+            }
         };
 
-        quote! {
+        enum_variants.push(enum_variant);
+        index_arms.push(quote! { Self::#variant(..) => #idx, });
+        names.push(name_str);
+        match_arms.push(match_arm);
+        sender_methods.push(quote! {
             /// Enqueues the operation and returns the handle its outcome
             /// lands on.
             pub fn #method(&self, #(#param_decls),*) -> rillet::op::Op<#reason_ty> {
@@ -798,8 +722,46 @@ fn generate_command_infra(
                 }
                 __op
             }
+        });
+    }
+
+    let index_body = if commands.is_empty() && ops.is_empty() {
+        quote! { unreachable!("empty command enum cannot be instantiated") }
+    } else {
+        quote! {
+            match self {
+                #(#index_arms)*
+            }
         }
-    }));
+    };
+
+    let command_enum = quote! {
+        #[allow(clippy::enum_variant_names, clippy::module_name_repetitions)]
+        enum #command_enum_name {
+            #(#enum_variants)*
+        }
+
+        impl #command_enum_name {
+            /// Array of command names for metrics.
+            const NAMES: [&'static str; #cmd_count] = [#(#names),*];
+
+            /// Returns the index of this command variant.
+            #[inline]
+            fn index(&self) -> usize {
+                #index_body
+            }
+        }
+    };
+
+    let execute_impl = quote! {
+        impl #command_enum_name {
+            fn execute(self, state: &mut #struct_name) {
+                match self {
+                    #(#match_arms)*
+                }
+            }
+        }
+    };
 
     let handle_impl = quote! {
         impl #handle_name {
@@ -871,17 +833,28 @@ fn generate_op_conclusions(struct_name: &Ident, ops: &[OpMethod]) -> TokenStream
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_spawn_impl(
-    struct_name: &Ident,
-    handle_name: &Ident,
-    command_enum_name: &Ident,
+/// The shared inputs of the spawn codegen functions.
+#[derive(Clone, Copy)]
+struct SpawnInputs<'a> {
+    struct_name: &'a Ident,
+    handle_name: &'a Ident,
+    command_enum_name: &'a Ident,
     has_commands: bool,
     cmd_count: usize,
     has_deferred_ops: bool,
-    event_handlers: &[EventHandler],
-    watch_handlers: &[WatchHandler],
-    tasks: &[TaskMethod],
-) -> TokenStream {
+    event_handlers: &'a [EventHandler],
+    watch_handlers: &'a [WatchHandler],
+    tasks: &'a [TaskMethod],
+}
+
+fn generate_spawn_impl(inputs: &SpawnInputs) -> TokenStream {
+    let SpawnInputs {
+        has_commands,
+        event_handlers,
+        watch_handlers,
+        tasks,
+        ..
+    } = *inputs;
     // A task with extra parameters needs the builder to carry them.
     let has_context_tasks = tasks.iter().any(|t| !t.extra_params.is_empty());
 
@@ -1147,27 +1120,9 @@ fn generate_spawn_impl(
     };
 
     if has_context_tasks {
-        generate_spawn_with_builder(
-            struct_name,
-            handle_name,
-            command_enum_name,
-            cmd_count,
-            has_deferred_ops,
-            tasks,
-            &event_receiver_setup,
-            &service_loop,
-        )
+        generate_spawn_with_builder(inputs, &event_receiver_setup, &service_loop)
     } else {
-        generate_spawn_simple(
-            struct_name,
-            handle_name,
-            command_enum_name,
-            cmd_count,
-            has_deferred_ops,
-            tasks,
-            &event_receiver_setup,
-            &service_loop,
-        )
+        generate_spawn_simple(inputs, &event_receiver_setup, &service_loop)
     }
 }
 
@@ -1175,14 +1130,18 @@ fn generate_spawn_impl(
 /// it spawns the service loop and returns the handle and the shared task
 /// handles.
 fn generate_spawn_core(
-    struct_name: &Ident,
-    handle_name: &Ident,
-    command_enum_name: &Ident,
-    cmd_count: usize,
-    has_deferred_ops: bool,
+    inputs: &SpawnInputs,
     event_receiver_setup: &[TokenStream],
     service_loop: &TokenStream,
 ) -> TokenStream {
+    let SpawnInputs {
+        struct_name,
+        handle_name,
+        command_enum_name,
+        cmd_count,
+        has_deferred_ops,
+        ..
+    } = *inputs;
     let expiry_spawn = if has_deferred_ops {
         quote! {
             {
@@ -1260,26 +1219,18 @@ fn generate_handle_task_spawn(struct_name: &Ident, method_name: &Ident) -> Token
 }
 
 /// Generate the plain spawn methods, used when every task is handle-only.
-#[allow(clippy::too_many_arguments)]
 fn generate_spawn_simple(
-    struct_name: &Ident,
-    handle_name: &Ident,
-    command_enum_name: &Ident,
-    cmd_count: usize,
-    has_deferred_ops: bool,
-    tasks: &[TaskMethod],
+    inputs: &SpawnInputs,
     event_receiver_setup: &[TokenStream],
     service_loop: &TokenStream,
 ) -> TokenStream {
-    let spawn_core = generate_spawn_core(
+    let SpawnInputs {
         struct_name,
         handle_name,
-        command_enum_name,
-        cmd_count,
-        has_deferred_ops,
-        event_receiver_setup,
-        service_loop,
-    );
+        tasks,
+        ..
+    } = *inputs;
+    let spawn_core = generate_spawn_core(inputs, event_receiver_setup, service_loop);
 
     let task_spawns: Vec<TokenStream> = tasks
         .iter()
@@ -1326,17 +1277,17 @@ fn generate_spawn_simple(
 }
 
 /// Generate the spawn builder, used when any task has extra parameters.
-#[allow(clippy::too_many_arguments)]
 fn generate_spawn_with_builder(
-    struct_name: &Ident,
-    handle_name: &Ident,
-    command_enum_name: &Ident,
-    cmd_count: usize,
-    has_deferred_ops: bool,
-    tasks: &[TaskMethod],
+    inputs: &SpawnInputs,
     event_receiver_setup: &[TokenStream],
     service_loop: &TokenStream,
 ) -> TokenStream {
+    let SpawnInputs {
+        struct_name,
+        handle_name,
+        tasks,
+        ..
+    } = *inputs;
     let builder_name = format_ident!("__{struct_name}Builder");
 
     let context_tasks: Vec<&TaskMethod> = tasks
@@ -1510,15 +1461,7 @@ fn generate_spawn_with_builder(
         })
         .collect();
 
-    let spawn_core = generate_spawn_core(
-        struct_name,
-        handle_name,
-        command_enum_name,
-        cmd_count,
-        has_deferred_ops,
-        event_receiver_setup,
-        service_loop,
-    );
+    let spawn_core = generate_spawn_core(inputs, event_receiver_setup, service_loop);
 
     quote! {
         /// A spawn builder tracking which context tasks are armed; the
