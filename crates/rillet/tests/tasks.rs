@@ -145,3 +145,20 @@ fn chained_context_tasks_all_run() {
     wait_for("both feed tasks to deliver", || mixer.items().len() == 3);
     mixer.cancel();
 }
+
+#[rillet::service]
+pub struct Bomb {}
+
+#[rillet::handlers]
+impl Bomb {
+    #[rillet(task)]
+    async fn explode(_handle: BombHandle, _cancel: CancellationToken) {
+        panic!("task exploded");
+    }
+}
+
+#[test]
+#[should_panic(expected = "task exploded")]
+fn completion_wait_resumes_a_task_panic() {
+    Bomb::new().spawn().cancel().wait();
+}
