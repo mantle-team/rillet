@@ -585,7 +585,7 @@ fn generate_command_infra(
             }
             OpKind::Deferred(deferred) => {
                 let key_ty = &deferred.key_ty;
-                quote! { #variant(rillet::op::Start<#key_ty, #reason_ty>, rillet::op::Resolver<#reason_ty>), }
+                quote! { #variant(#key_ty, rillet::op::Resolver<#reason_ty>), }
             }
         }
     }));
@@ -694,13 +694,11 @@ fn generate_command_infra(
                 } = &**deferred;
                 let reason_ty = &op.reason_ty;
                 quote! {
-                    #command_enum_name::#variant(__start, __resolver) => {
-                        let (__key, __deadline) = __start.__rillet_parts();
+                    #command_enum_name::#variant(__key, __resolver) => {
                         state.__rillet_ops.insert::<#key_ty, #reason_ty>(
                             #name_str,
                             __key.clone(),
                             __resolver,
-                            __deadline,
                             || #timeout,
                         );
                         state.#execute(__key)
@@ -773,15 +771,16 @@ fn generate_command_infra(
 
         // If the send fails (service gone, queue closed), the dropped
         // resolver concludes the operation as Lost.
-        let build_command = match &op.kind {
+        let build_pair_and_command = match &op.kind {
             OpKind::Immediate => quote! {
-                #command_enum_name::#variant(#(#param_names,)* __resolver)
+                let (__op, __resolver) = rillet::op::Op::<#reason_ty>::__rillet_pair(None);
+                let __command = #command_enum_name::#variant(#(#param_names,)* __resolver);
             },
             OpKind::Deferred(_) => quote! {
-                #command_enum_name::#variant(
-                    #struct_name::#method(#(#param_names),*),
-                    __resolver,
-                )
+                let (__key, __deadline) =
+                    #struct_name::#method(#(#param_names),*).__rillet_parts();
+                let (__op, __resolver) = rillet::op::Op::<#reason_ty>::__rillet_pair(__deadline);
+                let __command = #command_enum_name::#variant(__key, __resolver);
             },
         };
 
@@ -789,10 +788,10 @@ fn generate_command_infra(
             /// Enqueues the operation and returns the handle its outcome
             /// lands on.
             pub fn #method(&self, #(#param_decls),*) -> rillet::op::Op<#reason_ty> {
-                let (__op, __resolver) = rillet::op::Op::<#reason_ty>::__rillet_pair();
+                #build_pair_and_command
                 if rillet::runtime::send_command(
                     &self.cmd_tx,
-                    #build_command,
+                    __command,
                     stringify!(#method),
                 ) {
                     self.metrics.inc_enqueued(#idx);

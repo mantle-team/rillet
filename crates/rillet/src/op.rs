@@ -81,11 +81,11 @@ pub struct Op<R> {
 
 impl<R> Op<R> {
     #[doc(hidden)]
-    pub fn __rillet_pair() -> (Op<R>, Resolver<R>) {
+    pub fn __rillet_pair(deadline: Option<Instant>) -> (Op<R>, Resolver<R>) {
         let shared = Arc::new(Shared {
             state: ArcSwap::from_pointee(OpState::Pending {
                 since: Instant::now(),
-                deadline: None,
+                deadline,
             }),
             wake: Event::new(),
         });
@@ -93,10 +93,7 @@ impl<R> Op<R> {
             Op {
                 shared: shared.clone(),
             },
-            Resolver {
-                shared,
-                resolved: false,
-            },
+            Resolver { shared },
         )
     }
 
@@ -142,35 +139,33 @@ impl<R> Clone for Op<R> {
 #[doc(hidden)]
 pub struct Resolver<R> {
     shared: Arc<Shared<R>>,
-    resolved: bool,
 }
 
 impl<R> Resolver<R> {
     /// Concludes the operation successfully.
-    pub fn succeed(mut self) {
-        self.resolved = true;
+    pub fn succeed(self) {
         self.shared.store(OpState::Done { at: Instant::now() });
     }
 
     /// Concludes the operation unsuccessfully.
-    pub fn fail(mut self, reason: R) {
-        self.resolved = true;
+    pub fn fail(self, reason: R) {
         self.shared.store(OpState::Failed {
             reason,
             at: Instant::now(),
         });
     }
 
-    fn set_deadline(&self, deadline: Option<Instant>) {
-        if let OpState::Pending { since, .. } = **self.shared.state.load() {
-            self.shared.store(OpState::Pending { since, deadline });
+    fn deadline(&self) -> Option<Instant> {
+        match **self.shared.state.load() {
+            OpState::Pending { deadline, .. } => deadline,
+            _ => None,
         }
     }
 }
 
 impl<R> Drop for Resolver<R> {
     fn drop(&mut self) {
-        if !self.resolved {
+        if self.shared.state.load().is_pending() {
             self.shared.store(OpState::Lost { at: Instant::now() });
         }
     }
@@ -235,16 +230,14 @@ impl OpsCell {
         }
     }
 
-    /// Parks a resolver under a key, stamping the deadline onto its
-    /// operation. A resolver already parked under the key is displaced and
-    /// its operation concludes as `Lost`; a resolver inserted into a closed
-    /// cell concludes as `Lost` at once.
+    /// Parks a resolver under a key. A resolver already parked under the
+    /// key is displaced and its operation concludes as `Lost`; a resolver
+    /// inserted into a closed cell concludes as `Lost` at once.
     pub fn insert<K, R>(
         &self,
         op: &'static str,
         key: K,
         resolver: Resolver<R>,
-        deadline: Option<Instant>,
         timeout_reason: impl FnOnce() -> R,
     ) where
         K: Ord + Clone + Send + 'static,
@@ -253,10 +246,12 @@ impl OpsCell {
         if self.inner.closed.load(Ordering::Acquire) {
             return;
         }
+        let deadline = resolver.deadline();
         let registry = self.registry_or_init::<K, R>(op);
-        resolver.set_deadline(deadline);
         registry.insert(key, resolver, deadline.map(|at| (at, timeout_reason())));
-        self.inner.wake.notify(usize::MAX);
+        if deadline.is_some() {
+            self.inner.wake.notify(usize::MAX);
+        }
     }
 
     /// Queues a successful conclusion for the operation under a key; a
@@ -347,25 +342,23 @@ impl OpsCell {
             .expect("op registered under one key and reason type")
     }
 
-    fn sources(&self) -> Vec<Arc<dyn DeadlineSource>> {
+    fn next_deadline(&self) -> Option<Instant> {
         self.inner
             .registries
             .lock()
             .expect("ops registries poisoned")
             .values()
-            .cloned()
-            .collect()
-    }
-
-    fn next_deadline(&self) -> Option<Instant> {
-        self.sources()
-            .iter()
             .filter_map(|source| source.next_deadline())
             .min()
     }
 
     fn expire(&self, now: Instant) {
-        for source in self.sources() {
+        let registries = self
+            .inner
+            .registries
+            .lock()
+            .expect("ops registries poisoned");
+        for source in registries.values() {
             source.expire(now);
         }
     }
@@ -378,7 +371,12 @@ impl OpsCell {
     /// does every operation inserted afterwards.
     pub fn close(&self) {
         self.inner.closed.store(true, Ordering::Release);
-        for source in self.sources() {
+        let registries = self
+            .inner
+            .registries
+            .lock()
+            .expect("ops registries poisoned");
+        for source in registries.values() {
             source.drain();
         }
     }
@@ -562,34 +560,34 @@ mod tests {
 
     #[test]
     fn new_op_is_pending() {
-        let (op, _resolver) = Op::<Reason>::__rillet_pair();
+        let (op, _resolver) = Op::<Reason>::__rillet_pair(None);
         assert!(op.state().is_pending());
     }
 
     #[test]
     fn succeed_concludes_the_operation() {
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
+        let (op, resolver) = Op::<Reason>::__rillet_pair(None);
         resolver.succeed();
         assert!(matches!(*op.state(), OpState::Done { .. }));
     }
 
     #[test]
     fn fail_records_the_reason() {
-        let (op, resolver) = Op::__rillet_pair();
+        let (op, resolver) = Op::__rillet_pair(None);
         resolver.fail(Reason::Declined);
         assert_eq!(op.state().failure(), Some(&Reason::Declined));
     }
 
     #[test]
     fn dropped_resolver_concludes_as_lost() {
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
+        let (op, resolver) = Op::<Reason>::__rillet_pair(None);
         drop(resolver);
         assert!(matches!(*op.state(), OpState::Lost { .. }));
     }
 
     #[test]
     fn resolution_is_visible_before_the_wake() {
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
+        let (op, resolver) = Op::<Reason>::__rillet_pair(None);
         let listener = op.listen();
         resolver.succeed();
         futures_lite::future::block_on(listener);
@@ -598,7 +596,7 @@ mod tests {
 
     #[test]
     fn concluded_returns_the_final_state() {
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
+        let (op, resolver) = Op::<Reason>::__rillet_pair(None);
         let waiter = op.clone();
         let handle = std::thread::spawn(move || futures_lite::future::block_on(waiter.concluded()));
         std::thread::sleep(Duration::from_millis(20));
@@ -609,8 +607,8 @@ mod tests {
     #[test]
     fn cell_concludes_by_key_at_the_flush() {
         let cell = OpsCell::new();
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 1u32, resolver, None, || Reason::TimedOut);
+        let (op, resolver) = Op::<Reason>::__rillet_pair(None);
+        cell.insert("send", 1u32, resolver, || Reason::TimedOut);
 
         cell.succeed::<u32, Reason>("send", &1);
         assert!(op.state().is_pending());
@@ -624,11 +622,9 @@ mod tests {
     }
 
     #[test]
-    fn insert_stamps_the_deadline_onto_the_operation() {
-        let cell = OpsCell::new();
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
+    fn an_op_carries_its_deadline_from_creation() {
         let deadline = Instant::now() + Duration::from_secs(60);
-        cell.insert("send", 1u32, resolver, Some(deadline), || Reason::TimedOut);
+        let (op, _resolver) = Op::<Reason>::__rillet_pair(Some(deadline));
         assert!(
             matches!(*op.state(), OpState::Pending { deadline: Some(at), .. } if at == deadline)
         );
@@ -637,10 +633,10 @@ mod tests {
     #[test]
     fn insert_displaces_a_parked_operation() {
         let cell = OpsCell::new();
-        let (first, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 1u32, resolver, None, || Reason::TimedOut);
-        let (second, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 1u32, resolver, None, || Reason::TimedOut);
+        let (first, resolver) = Op::<Reason>::__rillet_pair(None);
+        cell.insert("send", 1u32, resolver, || Reason::TimedOut);
+        let (second, resolver) = Op::<Reason>::__rillet_pair(None);
+        cell.insert("send", 1u32, resolver, || Reason::TimedOut);
 
         assert!(matches!(*first.state(), OpState::Lost { .. }));
         assert!(second.state().is_pending());
@@ -650,10 +646,10 @@ mod tests {
     fn each_operation_times_out_with_its_own_reason() {
         let cell = OpsCell::new();
         let now = Instant::now();
-        let (first, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 1u32, resolver, Some(now), || Reason::Declined);
-        let (second, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 2u32, resolver, Some(now), || Reason::TimedOut);
+        let (first, resolver) = Op::<Reason>::__rillet_pair(Some(now));
+        cell.insert("send", 1u32, resolver, || Reason::Declined);
+        let (second, resolver) = Op::<Reason>::__rillet_pair(Some(now));
+        cell.insert("send", 2u32, resolver, || Reason::TimedOut);
 
         cell.expire(now);
         assert_eq!(first.state().failure(), Some(&Reason::Declined));
@@ -663,16 +659,16 @@ mod tests {
     #[test]
     fn timeout_reason_is_unevaluated_without_a_deadline() {
         let cell = OpsCell::new();
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 1u32, resolver, None, || unreachable!());
+        let (op, resolver) = Op::<Reason>::__rillet_pair(None);
+        cell.insert("send", 1u32, resolver, || unreachable!());
         assert!(op.state().is_pending());
     }
 
     #[test]
     fn close_concludes_parked_operations_as_lost() {
         let cell = OpsCell::new();
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 1u32, resolver, None, || Reason::TimedOut);
+        let (op, resolver) = Op::<Reason>::__rillet_pair(None);
+        cell.insert("send", 1u32, resolver, || Reason::TimedOut);
         cell.close();
         assert!(matches!(*op.state(), OpState::Lost { .. }));
     }
@@ -681,8 +677,8 @@ mod tests {
     fn insert_into_a_closed_cell_concludes_as_lost() {
         let cell = OpsCell::new();
         cell.close();
-        let (op, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 1u32, resolver, None, || Reason::TimedOut);
+        let (op, resolver) = Op::<Reason>::__rillet_pair(None);
+        cell.insert("send", 1u32, resolver, || Reason::TimedOut);
         assert!(matches!(*op.state(), OpState::Lost { .. }));
     }
 
@@ -690,18 +686,12 @@ mod tests {
     fn expire_fails_only_operations_past_their_deadline() {
         let cell = OpsCell::new();
         let now = Instant::now();
-        let (due, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 1u32, resolver, Some(now), || Reason::TimedOut);
-        let (later, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert(
-            "send",
-            2u32,
-            resolver,
-            Some(now + Duration::from_secs(60)),
-            || Reason::TimedOut,
-        );
-        let (forever, resolver) = Op::<Reason>::__rillet_pair();
-        cell.insert("send", 3u32, resolver, None, || Reason::TimedOut);
+        let (due, resolver) = Op::<Reason>::__rillet_pair(Some(now));
+        cell.insert("send", 1u32, resolver, || Reason::TimedOut);
+        let (later, resolver) = Op::<Reason>::__rillet_pair(Some(now + Duration::from_secs(60)));
+        cell.insert("send", 2u32, resolver, || Reason::TimedOut);
+        let (forever, resolver) = Op::<Reason>::__rillet_pair(None);
+        cell.insert("send", 3u32, resolver, || Reason::TimedOut);
 
         cell.expire(now);
         assert_eq!(due.state().failure(), Some(&Reason::TimedOut));
