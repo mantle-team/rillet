@@ -154,3 +154,26 @@ fn commands_carry_multiple_parameters() {
     assert_eq!(bank.transfers(), vec![("alice".into(), "bob".into(), 7)]);
     bank.cancel();
 }
+
+#[test]
+fn a_command_burst_populates_aggregate_stats() {
+    let ledger = Ledger::new("busy".into()).spawn();
+    for value in 0..150 {
+        ledger.record(value);
+    }
+    wait_for("burst to process", || {
+        ledger.aggregate_stats().total_processed == 150
+    });
+
+    let stats = ledger.aggregate_stats();
+    assert_eq!(stats.total_enqueued, 150);
+    assert_eq!(stats.depth, 0);
+    // The 100-command sampling path recorded a sample during the burst.
+    assert!(stats.throughput_1s >= 1.0);
+
+    let record = ledger.command_stats().next().unwrap();
+    assert_eq!(record.name, "record");
+    assert_eq!(record.total_enqueued, 150);
+    assert_eq!(record.total_processed, 150);
+    ledger.cancel();
+}
