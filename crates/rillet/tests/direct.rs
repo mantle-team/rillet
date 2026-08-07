@@ -24,6 +24,11 @@ impl Gauge {
         self.level * self.level
     }
 
+    #[rillet(direct)]
+    fn level_plus(&self, offset: i64) -> i64 {
+        self.level + offset
+    }
+
     #[rillet(direct_mut)]
     fn set_level(&mut self, level: i64) -> i64 {
         self.level = level;
@@ -57,5 +62,13 @@ fn direct_mut_republishes_the_view_before_returning() {
     // current the moment it returns, with no waiting on the service loop.
     assert_eq!(gauge.view().level, 3);
     assert_eq!(watch.try_changed().map(|view| view.level), Some(3));
+    gauge.cancel();
+}
+
+#[test]
+fn direct_methods_take_arguments() {
+    let gauge = Gauge::new().spawn();
+    gauge.set_level(5);
+    assert_eq!(gauge.level_plus(3), 8);
     gauge.cancel();
 }
