@@ -131,3 +131,26 @@ fn commands_after_cancel_are_dropped_silently() {
     assert_eq!(ledger.aggregate_stats().total_enqueued, 0);
     assert_eq!(ledger.aggregate_stats().depth, 0);
 }
+
+#[rillet::service]
+pub struct Bank {
+    #[rillet(get, default)]
+    transfers: Vec<(String, String, u64)>,
+}
+
+#[rillet::handlers]
+impl Bank {
+    #[rillet(command)]
+    fn transfer(&mut self, from: String, to: String, amount: u64) {
+        self.transfers.push((from, to, amount));
+    }
+}
+
+#[test]
+fn commands_carry_multiple_parameters() {
+    let bank = Bank::new().spawn();
+    bank.transfer("alice".into(), "bob".into(), 7);
+    wait_for("transfer to process", || bank.transfers().len() == 1);
+    assert_eq!(bank.transfers(), vec![("alice".into(), "bob".into(), 7)]);
+    bank.cancel();
+}
