@@ -676,8 +676,12 @@ fn generate_command_infra(
                 quote! {
                     #command_enum_name::#variant(#(#param_names,)* __resolver) => {
                         match state.#method(#(#param_names),*) {
-                            Ok(()) => __resolver.succeed(),
-                            Err(__reason) => __resolver.fail(__reason),
+                            Ok(()) => state
+                                .__rillet_ops
+                                .queue_conclusion(move || __resolver.succeed()),
+                            Err(__reason) => state
+                                .__rillet_ops
+                                .queue_conclusion(move || __resolver.fail(__reason)),
                         }
                     }
                 }
@@ -950,6 +954,7 @@ fn generate_spawn_impl(
                                 let mut s = state.write().expect("service state poisoned by a panicked handler");
                                 s.#method(event);
                                 s.__rillet_publish_view();
+                                s.__rillet_ops.flush_conclusions();
                             }
                             #exit_check
                         }
@@ -971,6 +976,7 @@ fn generate_spawn_impl(
                     let mut s = state.write().expect("service state poisoned by a panicked handler");
                     s.#method(view);
                     s.__rillet_publish_view();
+                    s.__rillet_ops.flush_conclusions();
                 }
                 #exit_check
             }
@@ -1019,6 +1025,7 @@ fn generate_spawn_impl(
             let mut s = state.write().expect("service state poisoned by a panicked handler");
             cmd.execute(&mut s);
             s.__rillet_publish_view();
+            s.__rillet_ops.flush_conclusions();
 
             s.__rillet_sampling_state.inc_command();
             if s.__rillet_sampling_state.should_sample() {
@@ -1625,6 +1632,7 @@ fn generate_direct_mut_methods(
                     let mut s = self.state.write().expect("service state poisoned by a panicked handler");
                     let result = s.#method_name(#(#param_names),*);
                     s.__rillet_publish_view();
+                    s.__rillet_ops.flush_conclusions();
                     result
                 }
             }

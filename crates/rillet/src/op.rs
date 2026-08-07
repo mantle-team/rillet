@@ -217,6 +217,8 @@ pub struct OpsCell {
 struct CellInner {
     registries: Mutex<HashMap<&'static str, Arc<dyn DeadlineSource>>>,
     wake: Event,
+    /// Conclusions queued by handlers and not yet applied.
+    conclusions: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
 
 impl OpsCell {
@@ -225,6 +227,7 @@ impl OpsCell {
             inner: Arc::new(CellInner {
                 registries: Mutex::new(HashMap::new()),
                 wake: Event::new(),
+                conclusions: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -249,27 +252,50 @@ impl OpsCell {
         self.inner.wake.notify(usize::MAX);
     }
 
-    /// Concludes the operation under a key successfully; without one, does
-    /// nothing.
+    /// Queues a successful conclusion for the operation under a key; a
+    /// key with no pending operation concludes nothing.
     pub fn succeed<K, R>(&self, op: &'static str, key: &K)
     where
         K: Ord + Clone + Send + 'static,
         R: Clone + Send + Sync + 'static,
     {
         if let Some(resolver) = self.take::<K, R>(op, key) {
-            resolver.succeed();
+            self.queue_conclusion(move || resolver.succeed());
         }
     }
 
-    /// Concludes the operation under a key unsuccessfully; without one,
-    /// does nothing.
+    /// Queues an unsuccessful conclusion for the operation under a key; a
+    /// key with no pending operation concludes nothing.
     pub fn fail<K, R>(&self, op: &'static str, key: &K, reason: R)
     where
         K: Ord + Clone + Send + 'static,
         R: Clone + Send + Sync + 'static,
     {
         if let Some(resolver) = self.take::<K, R>(op, key) {
-            resolver.fail(reason);
+            self.queue_conclusion(move || resolver.fail(reason));
+        }
+    }
+
+    /// Queues a conclusion.
+    pub fn queue_conclusion(&self, conclude: impl FnOnce() + Send + 'static) {
+        self.inner
+            .conclusions
+            .lock()
+            .expect("ops conclusions poisoned")
+            .push(Box::new(conclude));
+    }
+
+    /// Applies every queued conclusion.
+    pub fn flush_conclusions(&self) {
+        let queued: Vec<_> = std::mem::take(
+            &mut *self
+                .inner
+                .conclusions
+                .lock()
+                .expect("ops conclusions poisoned"),
+        );
+        for conclude in queued {
+            conclude();
         }
     }
 
@@ -560,16 +586,19 @@ mod tests {
     }
 
     #[test]
-    fn cell_concludes_by_key() {
+    fn cell_concludes_by_key_at_the_flush() {
         let cell = OpsCell::new();
         let (op, resolver) = Op::<Reason>::__rillet_pair();
         cell.insert("send", 1u32, resolver, None, || Reason::TimedOut);
 
         cell.succeed::<u32, Reason>("send", &1);
+        assert!(op.state().is_pending());
+        cell.flush_conclusions();
         assert!(matches!(*op.state(), OpState::Done { .. }));
 
         // A late outcome finds nothing to conclude.
         cell.fail::<u32, Reason>("send", &1, Reason::Declined);
+        cell.flush_conclusions();
         assert!(matches!(*op.state(), OpState::Done { .. }));
     }
 
