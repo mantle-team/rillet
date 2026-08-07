@@ -706,7 +706,9 @@ fn generate_spawn_impl(
         );
     };
 
-    let service_loop = if has_commands && has_events {
+    // With no event handlers the event interpolations expand to nothing
+    // and the exit check reduces to breaking on command-channel close.
+    let service_loop = if has_commands {
         quote! {
             let state = state_clone;
             let mut cmd_rx = cmd_rx;
@@ -738,33 +740,6 @@ fn generate_spawn_impl(
                         }
                     }
                     #(#event_select_arms)*
-                }
-            }
-        }
-    } else if has_commands {
-        quote! {
-            let state = state_clone;
-            let cmd_rx = cmd_rx;
-            loop {
-                use rillet::runtime::FutureExt;
-
-                let mut cancel_fut = std::pin::pin!(cancel_token.cancelled().fuse());
-                let mut cmd_fut = std::pin::pin!(cmd_rx.recv().fuse());
-
-                rillet::runtime::futures::select! {
-                    _ = cancel_fut => {
-                        // Drain remaining commands before exit
-                        #cmd_drain
-                        break;
-                    }
-                    result = cmd_fut => {
-                        match result {
-                            Ok(cmd) => {
-                                #cmd_process_with_metrics
-                            }
-                            Err(_) => break,
-                        }
-                    }
                 }
             }
         }
