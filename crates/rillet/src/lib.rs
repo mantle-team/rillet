@@ -18,6 +18,7 @@ mod spawner;
 
 pub mod event;
 pub mod metrics;
+pub mod op;
 pub mod view;
 
 #[doc(hidden)]
@@ -31,4 +32,5 @@ pub use rillet_macros::service;
 
 pub use cancellation::CancellationToken;
 pub use event::EventReceiver;
+pub use op::{Op, OpState, Start};
 pub use spawner::{SmolSpawner, Spawner, TaskHandle};

@@ -6,7 +6,7 @@
 use std::future::Future;
 
 /// A handle to a spawned task that can be blocked on.
-pub trait TaskHandle: Send + 'static {
+pub trait TaskHandle: Send + Sync + 'static {
     /// Blocks the current thread until the task completes.
     fn block_on(self: Box<Self>);
 }
