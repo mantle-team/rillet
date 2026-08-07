@@ -1,0 +1,10 @@
+[package]
+name = "egui-counter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rillet = { path = "../../crates/rillet" }
+eframe = "0.36"
+futures-lite = "2"

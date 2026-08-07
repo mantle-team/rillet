@@ -4,29 +4,36 @@
 default:
     @just --list
 
-# Build the library
+# Build the workspace
 build:
-    cargo build
+    cargo build --workspace
 
 # Run tests
 test:
-    cargo test
+    cargo test --workspace
 
-# Run all checks (build, lint, format, tests, package, semver)
-check: build check-lint check-format test check-package check-semver
+# Run all checks (build, lint, format, tests, features, package, semver)
+check: build check-lint check-format test check-features check-package check-semver
 
 # Run quick checks (build, lint, format)
 check-quick: build check-lint check-format
 
+# Check every feature combination
+check-features:
+    @echo "Checking feature combinations..."
+    cargo test -p rillet --no-default-features
+    cargo test -p rillet --no-default-features --features im
+    cargo test -p rillet --no-default-features --features smol-str
+
 # Check code formatting
 check-format:
     @echo "Checking format..."
-    cargo fmt -- --check
+    cargo fmt --all -- --check
 
 # Check clippy lints
 check-lint:
     @echo "Running clippy..."
-    cargo clippy -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # Check tag validity
 check-tag tag:
@@ -38,16 +45,17 @@ check-tag tag:
         exit 1
     fi
 
-# Publish the crate
+# Publish the crates
 publish:
-    cargo publish
+    cargo publish -p rillet-macros
+    cargo publish -p rillet
 
 # Check crate packaging
 check-package:
     @echo "Checking package..."
-    cargo publish --dry-run
+    cargo publish --dry-run --workspace
 
 # Check semver compatibility
 check-semver:
     @echo "Checking semver..."
-    cargo semver-checks
+    cargo semver-checks --package rillet

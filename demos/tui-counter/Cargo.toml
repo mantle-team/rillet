@@ -1,0 +1,12 @@
+[package]
+name = "tui-counter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rillet = { path = "../../crates/rillet" }
+ratatui = "0.30"
+crossterm = "0.29"
+smol = "2"
+futures = "0.3"
