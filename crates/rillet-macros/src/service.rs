@@ -348,7 +348,7 @@ fn generate_getters(handle_name: &Ident, getters: &[GetterField]) -> TokenStream
 
             quote! {
                 pub fn #field_name(&self) -> #field_type {
-                    self.state.read().unwrap().#field_name.clone()
+                    self.state.read().expect("service state poisoned by a panicked handler").#field_name.clone()
                 }
             }
         })
@@ -379,7 +379,7 @@ fn generate_subscription_methods(handle_name: &Ident, emitted_events: &[Ident]) 
                 /// Returns a receiver for all future events of this type.
                 pub fn #method_name(&self) -> rillet::event::EventReceiver<#event> {
                     rillet::event::EventReceiver::new(
-                        self.state.read().unwrap().__rillet_emitter.subscribe::<#event>()
+                        self.state.read().expect("service state poisoned by a panicked handler").__rillet_emitter.subscribe::<#event>()
                     )
                 }
             }
@@ -394,7 +394,7 @@ fn generate_subscription_methods(handle_name: &Ident, emitted_events: &[Ident]) 
             quote! {
                 /// Emits the event to all subscribers.
                 pub fn #method_name(&self, event: #event) {
-                    self.state.read().unwrap().__rillet_emitter.emit(event);
+                    self.state.read().expect("service state poisoned by a panicked handler").__rillet_emitter.emit(event);
                 }
             }
         })
@@ -410,12 +410,12 @@ fn generate_subscription_methods(handle_name: &Ident, emitted_events: &[Ident]) 
             quote! {
                 /// Returns the total number of events published for this event type.
                 pub fn #published_method(&self) -> u64 {
-                    self.state.read().unwrap().__rillet_emitter.published::<#event>()
+                    self.state.read().expect("service state poisoned by a panicked handler").__rillet_emitter.published::<#event>()
                 }
 
                 /// Returns the current number of subscribers for this event type.
                 pub fn #subscribers_method(&self) -> usize {
-                    self.state.read().unwrap().__rillet_emitter.subscriber_count::<#event>()
+                    self.state.read().expect("service state poisoned by a panicked handler").__rillet_emitter.subscriber_count::<#event>()
                 }
             }
         })

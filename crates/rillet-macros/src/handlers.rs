@@ -567,7 +567,7 @@ fn generate_spawn_impl(
     let exit_check = quote! {
         if !cmd_open {
             let inputs_open = #inputs_open_expr;
-            if !inputs_open || !state.read().unwrap().__rillet_has_observers() {
+            if !inputs_open || !state.read().expect("service state poisoned by a panicked handler").__rillet_has_observers() {
                 break;
             }
         }
@@ -586,7 +586,7 @@ fn generate_spawn_impl(
                     match result {
                         Some(event) => {
                             {
-                                let mut s = state.write().unwrap();
+                                let mut s = state.write().expect("service state poisoned by a panicked handler");
                                 s.#method(event);
                                 s.__rillet_publish_view();
                             }
@@ -607,7 +607,7 @@ fn generate_spawn_impl(
         quote! {
             view = #fut_name => {
                 {
-                    let mut s = state.write().unwrap();
+                    let mut s = state.write().expect("service state poisoned by a panicked handler");
                     s.#method(view);
                     s.__rillet_publish_view();
                 }
@@ -656,7 +656,7 @@ fn generate_spawn_impl(
     let cmd_process_with_metrics = quote! {
         let cmd_idx = cmd.index();
         {
-            let mut s = state.write().unwrap();
+            let mut s = state.write().expect("service state poisoned by a panicked handler");
             cmd.execute(&mut s);
             s.__rillet_publish_view();
 
@@ -1197,7 +1197,7 @@ fn generate_direct_methods(
             quote! {
                 /// Runs on the caller's thread under the service's read lock.
                 pub fn #method_name(&self, #(#param_decls),*) #return_type {
-                    self.state.read().unwrap().#method_name(#(#param_names),*)
+                    self.state.read().expect("service state poisoned by a panicked handler").#method_name(#(#param_names),*)
                 }
             }
         })
@@ -1240,7 +1240,7 @@ fn generate_direct_mut_methods(
                 /// Runs on the caller's thread under the service's write
                 /// lock, republishing the view before returning.
                 pub fn #method_name(&self, #(#param_decls),*) #return_type {
-                    let mut s = self.state.write().unwrap();
+                    let mut s = self.state.write().expect("service state poisoned by a panicked handler");
                     let result = s.#method_name(#(#param_names),*);
                     s.__rillet_publish_view();
                     result

@@ -9,6 +9,9 @@
 //! A service runs until it is cancelled or until nothing can reach it:
 //! every handle has been dropped, and either every event source it
 //! listens to has closed or no subscriber or view watcher remains.
+//! A panicking handler terminates the service: later state access through
+//! its handles panics, while cancellation and task completion still work
+//! and waiting on the completion resumes the panic.
 
 mod cancellation;
 mod spawner;
