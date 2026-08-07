@@ -38,7 +38,8 @@ pub fn derive_event(input: TokenStream) -> TokenStream {
 ///
 /// `#[rillet(command)]` methods gain a queueing method on the handle and run
 /// serially on the service loop. `#[rillet(from = field)]` methods run for
-/// each event of the parameter's type emitted by that field.
+/// each event of the parameter's type emitted by that field; the wiring is
+/// by name, so the parameter must spell the declared event type directly.
 /// `#[rillet(watch = field)]` methods run for each view published by that
 /// field. `#[rillet(direct)]` and `#[rillet(direct_mut)]` methods run on the
 /// caller's thread under the service's lock. `#[rillet(task)]` methods are
