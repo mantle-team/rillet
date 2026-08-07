@@ -127,3 +127,45 @@ fn view_handle_narrows_to_reads_and_watching() {
     assert_eq!(view.value, 1);
     counter.cancel();
 }
+
+#[rillet::service]
+pub struct SplitMirror {
+    left: CounterHandle,
+    right: CounterHandle,
+
+    #[rillet(get, default)]
+    left_value: u64,
+
+    #[rillet(get, default)]
+    right_value: u64,
+}
+
+#[rillet::handlers]
+impl SplitMirror {
+    #[rillet(watch = left)]
+    fn on_left_view(&mut self, view: Arc<CounterView>) {
+        self.left_value = view.value;
+    }
+
+    #[rillet(watch = right)]
+    fn on_right_view(&mut self, view: Arc<CounterView>) {
+        self.right_value = view.value;
+    }
+}
+
+#[test]
+fn one_loop_runs_multiple_watch_handlers() {
+    let left = Counter::new().spawn();
+    let right = Counter::new().spawn();
+    let mirror = SplitMirror::new(left.clone(), right.clone()).spawn();
+
+    left.set(11);
+    right.set(22);
+
+    wait_for("both watch handlers to run", || {
+        mirror.left_value() == 11 && mirror.right_value() == 22
+    });
+    mirror.cancel();
+    right.cancel();
+    left.cancel();
+}

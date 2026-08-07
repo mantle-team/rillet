@@ -202,3 +202,46 @@ fn emitter_counts_published_events_and_subscribers() {
     wait_for("publish counter to tick", || bird.chirp_published() == 1);
     bird.cancel();
 }
+
+#[rillet::service]
+pub struct Aviary {
+    bird: BirdHandle,
+    macaw: MacawHandle,
+
+    #[rillet(get, default)]
+    chirped: u32,
+
+    #[rillet(get, default)]
+    squawked: u32,
+}
+
+#[rillet::handlers]
+impl Aviary {
+    #[rillet(from = bird)]
+    fn on_chirp(&mut self, event: Chirp) {
+        self.chirped += event.loudness;
+    }
+
+    #[rillet(from = macaw)]
+    fn on_squawk(&mut self, event: Squawk) {
+        self.squawked += event.volume;
+    }
+}
+
+#[test]
+fn one_loop_runs_multiple_event_handlers() {
+    let bird = Bird::new().spawn();
+    let macaw = Macaw::new().spawn();
+    let aviary = Aviary::new(bird.clone(), macaw.clone()).spawn();
+
+    bird.chirp(2);
+    macaw.squawk(5);
+    bird.chirp(3);
+
+    wait_for("both handlers to run", || {
+        aviary.chirped() == 5 && aviary.squawked() == 5
+    });
+    aviary.cancel();
+    macaw.cancel();
+    bird.cancel();
+}
