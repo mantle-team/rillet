@@ -107,3 +107,41 @@ fn context_tasks_receive_their_arguments() {
     assert_eq!(loader.items(), vec![1, 2, 3]);
     loader.cancel();
 }
+
+#[rillet::service]
+pub struct Mixer {
+    #[rillet(get, default)]
+    items: Vec<u32>,
+}
+
+#[rillet::handlers]
+impl Mixer {
+    #[rillet(command)]
+    fn add(&mut self, item: u32) {
+        self.items.push(item);
+    }
+
+    #[rillet(task)]
+    async fn feed_left(handle: MixerHandle, _cancel: CancellationToken, source: Vec<u32>) {
+        for item in source {
+            handle.add(item);
+        }
+    }
+
+    #[rillet(task)]
+    async fn feed_right(handle: MixerHandle, _cancel: CancellationToken, source: Vec<u32>) {
+        for item in source {
+            handle.add(item);
+        }
+    }
+}
+
+#[test]
+fn chained_context_tasks_all_run() {
+    let mixer = Mixer::new()
+        .spawn_feed_left(vec![1, 2])
+        .spawn_feed_right(vec![3])
+        .spawn();
+    wait_for("both feed tasks to deliver", || mixer.items().len() == 3);
+    mixer.cancel();
+}

@@ -936,9 +936,21 @@ fn generate_spawn_with_builder(
 ) -> TokenStream {
     let builder_name = format_ident!("__{struct_name}Builder");
 
-    let builder_fields: Vec<TokenStream> = tasks
+    let context_tasks: Vec<&TaskMethod> = tasks
         .iter()
         .filter(|t| !t.extra_params.is_empty())
+        .collect();
+
+    // One const-bool type-state flag per context task; spawn() exists only
+    // on the all-armed instantiation.
+    let flag_names: Vec<Ident> = context_tasks
+        .iter()
+        .map(|t| format_ident!("{}", t.method_name.to_string().to_uppercase()))
+        .collect();
+    let all_true: Vec<TokenStream> = flag_names.iter().map(|_| quote! { true }).collect();
+
+    let builder_fields: Vec<TokenStream> = context_tasks
+        .iter()
         .map(|task| {
             let field_name = format_ident!("{}_ctx", task.method_name);
             let types: Vec<_> = task.extra_params.iter().map(|(_, ty)| ty).collect();
@@ -948,11 +960,12 @@ fn generate_spawn_with_builder(
         })
         .collect();
 
-    // The service's spawn_<task> methods each return the builder.
-    let service_spawn_methods: Vec<TokenStream> = tasks
+    // The service's spawn_<task> methods each return the builder with that
+    // task armed.
+    let service_spawn_methods: Vec<TokenStream> = context_tasks
         .iter()
-        .filter(|t| !t.extra_params.is_empty())
-        .map(|task| {
+        .enumerate()
+        .map(|(i, task)| {
             let method_name = format_ident!("spawn_{}", task.method_name);
             let field_name = format_ident!("{}_ctx", task.method_name);
             let param_decls: Vec<TokenStream> = task
@@ -962,10 +975,20 @@ fn generate_spawn_with_builder(
                 .collect();
             let param_names: Vec<_> = task.extra_params.iter().map(|(name, _)| name).collect();
 
+            let ret_args: Vec<TokenStream> = (0..context_tasks.len())
+                .map(|j| {
+                    if i == j {
+                        quote! { true }
+                    } else {
+                        quote! { false }
+                    }
+                })
+                .collect();
+
             // The other context fields start as None.
-            let other_inits: Vec<TokenStream> = tasks
+            let other_inits: Vec<TokenStream> = context_tasks
                 .iter()
-                .filter(|t| !t.extra_params.is_empty() && t.method_name != task.method_name)
+                .filter(|t| t.method_name != task.method_name)
                 .map(|t| {
                     let fname = format_ident!("{}_ctx", t.method_name);
                     quote! { #fname: None }
@@ -973,7 +996,7 @@ fn generate_spawn_with_builder(
                 .collect();
 
             quote! {
-                pub fn #method_name(self, #(#param_decls),*) -> #builder_name {
+                pub fn #method_name(self, #(#param_decls),*) -> #builder_name<#(#ret_args),*> {
                     #builder_name {
                         inner: self,
                         #field_name: Some((#(#param_names,)*)),
@@ -984,11 +1007,12 @@ fn generate_spawn_with_builder(
         })
         .collect();
 
-    // The builder's spawn_<task> methods chain.
-    let builder_spawn_methods: Vec<TokenStream> = tasks
+    // The builder's spawn_<task> methods chain, each flipping only its own
+    // flag; an already-armed task's method does not exist.
+    let builder_spawn_methods: Vec<TokenStream> = context_tasks
         .iter()
-        .filter(|t| !t.extra_params.is_empty())
-        .map(|task| {
+        .enumerate()
+        .map(|(i, task)| {
             let method_name = format_ident!("spawn_{}", task.method_name);
             let field_name = format_ident!("{}_ctx", task.method_name);
             let param_decls: Vec<TokenStream> = task
@@ -998,10 +1022,52 @@ fn generate_spawn_with_builder(
                 .collect();
             let param_names: Vec<_> = task.extra_params.iter().map(|(name, _)| name).collect();
 
+            let other_flags: Vec<&Ident> = flag_names
+                .iter()
+                .enumerate()
+                .filter_map(|(j, flag)| (i != j).then_some(flag))
+                .collect();
+            let self_args: Vec<TokenStream> = flag_names
+                .iter()
+                .enumerate()
+                .map(|(j, flag)| {
+                    if i == j {
+                        quote! { false }
+                    } else {
+                        quote! { #flag }
+                    }
+                })
+                .collect();
+            let ret_args: Vec<TokenStream> = flag_names
+                .iter()
+                .enumerate()
+                .map(|(j, flag)| {
+                    if i == j {
+                        quote! { true }
+                    } else {
+                        quote! { #flag }
+                    }
+                })
+                .collect();
+
+            let other_moves: Vec<TokenStream> = context_tasks
+                .iter()
+                .filter(|t| t.method_name != task.method_name)
+                .map(|t| {
+                    let fname = format_ident!("{}_ctx", t.method_name);
+                    quote! { #fname: self.#fname }
+                })
+                .collect();
+
             quote! {
-                pub fn #method_name(mut self, #(#param_decls),*) -> Self {
-                    self.#field_name = Some((#(#param_names,)*));
-                    self
+                impl<#(const #other_flags: bool),*> #builder_name<#(#self_args),*> {
+                    pub fn #method_name(self, #(#param_decls),*) -> #builder_name<#(#ret_args),*> {
+                        #builder_name {
+                            inner: self.inner,
+                            #field_name: Some((#(#param_names,)*)),
+                            #(#other_moves,)*
+                        }
+                    }
                 }
             }
         })
@@ -1025,7 +1091,10 @@ fn generate_spawn_with_builder(
                     .collect();
 
                 quote! {
-                    if let Some((#(#param_names,)*)) = self.#field_name {
+                    {
+                        let (#(#param_names,)*) = self
+                            .#field_name
+                            .expect("the builder type state arms every context task");
                         let handle = handle.clone();
                         let cancel_token = cancel_token.clone();
                         let task_handle = spawner.spawn(async move {
@@ -1048,8 +1117,10 @@ fn generate_spawn_with_builder(
     );
 
     quote! {
+        /// A spawn builder tracking which context tasks are armed; the
+        /// spawn methods exist once every one of them is.
         #[doc(hidden)]
-        pub struct #builder_name {
+        pub struct #builder_name<#(const #flag_names: bool),*> {
             inner: #struct_name,
             #(#builder_fields,)*
         }
@@ -1060,9 +1131,9 @@ fn generate_spawn_with_builder(
             #(#service_spawn_methods)*
         }
 
-        impl #builder_name {
-            #(#builder_spawn_methods)*
+        #(#builder_spawn_methods)*
 
+        impl #builder_name<#(#all_true),*> {
             /// Spawns this service on the default [`SmolSpawner`](rillet::SmolSpawner)
             /// and returns its handle.
             ///
