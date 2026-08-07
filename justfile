@@ -53,8 +53,7 @@ publish:
 # Check crate packaging
 check-package:
     @echo "Checking package..."
-    cargo publish --dry-run -p rillet-macros
-    cargo publish --dry-run -p rillet
+    cargo publish --dry-run --workspace
 
 # Check semver compatibility
 check-semver:
