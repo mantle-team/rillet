@@ -110,9 +110,12 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 });
                 clean_items.push(ImplItem::Fn(strip_rillet_attrs(method.clone())));
             } else if let Some(source_field) = attrs.from_field {
-                let (_, event_type) = extract_param(&method.sig.inputs)?.ok_or_else(|| {
-                    Error::new_spanned(method, "event handler must have an event parameter")
-                })?;
+                let (_, event_type) = extract_all_params(&method.sig.inputs)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        Error::new_spanned(method, "event handler must have an event parameter")
+                    })?;
                 event_handlers.push(EventHandler {
                     method_name: method.sig.ident.clone(),
                     source_field,
@@ -257,27 +260,6 @@ fn parse_method_attrs(method: &ImplItemFn) -> Result<MethodAttrs> {
     }
 
     Ok(attrs)
-}
-
-fn extract_param(
-    inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
-) -> Result<Option<(Ident, Type)>> {
-    for input in inputs.iter() {
-        if let FnArg::Typed(pat_type) = input {
-            let param_name = match &*pat_type.pat {
-                Pat::Ident(pat_ident) => pat_ident.ident.clone(),
-                other => {
-                    return Err(Error::new_spanned(
-                        other,
-                        "rillet handler parameters must be simple identifiers",
-                    ));
-                }
-            };
-            let param_type = (*pat_type.ty).clone();
-            return Ok(Some((param_name, param_type)));
-        }
-    }
-    Ok(None)
 }
 
 fn extract_all_params(
