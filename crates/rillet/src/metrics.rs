@@ -121,9 +121,10 @@ impl<const N: usize> CommandMetrics<N> {
         let total_enqueued = self.total_enqueued();
         let total_processed = self.total_processed();
 
-        let (mean_1s, max_1s, count_1s) = samples.stats_since(now - Duration::from_secs(1));
-        let (mean_10s, max_10s, _) = samples.stats_since(now - Duration::from_secs(10));
-        let (mean_1m, max_1m, _) = samples.stats_since(now - Duration::from_secs(60));
+        let (mean_1s, max_1s, count_1s) =
+            samples.stats_since(now.checked_sub(Duration::from_secs(1)));
+        let (mean_10s, max_10s, _) = samples.stats_since(now.checked_sub(Duration::from_secs(10)));
+        let (mean_1m, max_1m, _) = samples.stats_since(now.checked_sub(Duration::from_secs(60)));
 
         let throughput_1s = count_1s as f64;
 
@@ -222,8 +223,9 @@ impl SampleRing {
         }
     }
 
-    /// Returns (mean, max, count) for samples since the given instant.
-    pub fn stats_since(&self, since: Instant) -> (f64, u64, usize) {
+    /// Returns (mean, max, count) for samples since the given instant, or
+    /// over every sample when the window has no lower bound.
+    pub fn stats_since(&self, since: Option<Instant>) -> (f64, u64, usize) {
         let mut sum = 0u64;
         let mut max = 0u64;
         let mut count = 0usize;
@@ -231,7 +233,7 @@ impl SampleRing {
         for i in 0..self.len {
             let idx = (self.head + self.buffer.len() - 1 - i) % self.buffer.len();
             let (ts, depth) = self.buffer[idx];
-            if ts < since {
+            if since.is_some_and(|since| ts < since) {
                 break;
             }
             sum += depth;
@@ -350,10 +352,24 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
         ring.push(30);
 
-        let (mean, max, count) = ring.stats_since(Instant::now() - Duration::from_secs(1));
+        let (mean, max, count) =
+            ring.stats_since(Instant::now().checked_sub(Duration::from_secs(1)));
         assert_eq!(count, 3);
         assert_eq!(max, 30);
         assert!((mean - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn unbounded_window_covers_every_sample() {
+        let mut ring = SampleRing::with_capacity(5);
+
+        ring.push(10);
+        ring.push(20);
+
+        let (mean, max, count) = ring.stats_since(None);
+        assert_eq!(count, 2);
+        assert_eq!(max, 20);
+        assert!((mean - 15.0).abs() < 0.001);
     }
 
     #[test]
