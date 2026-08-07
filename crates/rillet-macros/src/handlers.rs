@@ -266,7 +266,12 @@ fn extract_param(
         if let FnArg::Typed(pat_type) = input {
             let param_name = match &*pat_type.pat {
                 Pat::Ident(pat_ident) => pat_ident.ident.clone(),
-                _ => continue,
+                other => {
+                    return Err(Error::new_spanned(
+                        other,
+                        "rillet handler parameters must be simple identifiers",
+                    ));
+                }
             };
             let param_type = (*pat_type.ty).clone();
             return Ok(Some((param_name, param_type)));
@@ -283,7 +288,12 @@ fn extract_all_params(
         if let FnArg::Typed(pat_type) = input {
             let param_name = match &*pat_type.pat {
                 Pat::Ident(pat_ident) => pat_ident.ident.clone(),
-                _ => continue,
+                other => {
+                    return Err(Error::new_spanned(
+                        other,
+                        "rillet handler parameters must be simple identifiers",
+                    ));
+                }
             };
             let param_type = (*pat_type.ty).clone();
             params.push((param_name, param_type));
