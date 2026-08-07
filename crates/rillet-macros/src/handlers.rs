@@ -36,8 +36,9 @@ struct EventHandler {
     method_name: Ident,
     /// The field whose events drive the handler.
     source_field: Ident,
-    /// The event type, taken from the method's parameter.
-    event_type: Type,
+    /// The upstream handle's subscription method, derived from the event
+    /// type name.
+    subscription_method: Ident,
 }
 
 /// A parsed view watch handler method.
@@ -119,7 +120,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 event_handlers.push(EventHandler {
                     method_name: method.sig.ident.clone(),
                     source_field,
-                    event_type,
+                    subscription_method: derive_subscription_method(&event_type)?,
                 });
                 clean_items.push(ImplItem::Fn(strip_rillet_attrs(method.clone())));
             } else if let Some(source_field) = attrs.watch_field {
@@ -314,19 +315,29 @@ fn strip_rillet_attrs(mut method: ImplItemFn) -> ImplItemFn {
 
 /// Derives the subscription method name from the event type, MessageSent
 /// becoming on_message_sent.
-fn derive_subscription_method(event_type: &Type) -> Ident {
+fn derive_subscription_method(event_type: &Type) -> Result<Ident> {
     let type_name = match event_type {
         Type::Path(type_path) => type_path
             .path
             .segments
             .last()
             .map(|seg| seg.ident.to_string())
-            .unwrap_or_default(),
-        _ => String::new(),
+            .ok_or_else(|| {
+                Error::new_spanned(
+                    event_type,
+                    "event handler parameter must be a named event type",
+                )
+            })?,
+        _ => {
+            return Err(Error::new_spanned(
+                event_type,
+                "event handler parameter must be a named event type",
+            ));
+        }
     };
 
     let snake_name = to_snake_case(&type_name);
-    format_ident!("on_{}", snake_name)
+    Ok(format_ident!("on_{}", snake_name))
 }
 
 // ============================================================================
@@ -516,7 +527,7 @@ fn generate_spawn_impl(
             let field = &handler.source_field;
             let handler_method = &handler.method_name;
             let rx_name = format_ident!("{}_rx", handler_method);
-            let subscription_method = derive_subscription_method(&handler.event_type);
+            let subscription_method = &handler.subscription_method;
             quote! {
                 let mut #rx_name = self.#field.#subscription_method();
             }
