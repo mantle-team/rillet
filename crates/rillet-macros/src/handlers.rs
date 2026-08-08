@@ -99,6 +99,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
     let command_enum_name = format_ident!("{}Command", struct_name);
     let handle_name = format_ident!("{}Handle", struct_name);
+    let gauges_alias = format_ident!("__{}Gauges", struct_name);
 
     let mut command_methods: Vec<CommandMethod> = Vec::new();
     let mut direct_methods: Vec<DirectMethod> = Vec::new();
@@ -198,7 +199,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             cmd_tx: rillet::runtime::mpsc::Sender<#command_enum_name>,
             metrics: rillet::runtime::Arc<rillet::metrics::CommandMetrics<#cmd_count>>,
             __rillet_view: Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>>,
-            __rillet_gauges: Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>>,
+            __rillet_gauges: #gauges_alias,
             __rillet_cancel_token: rillet::runtime::CancellationToken,
             __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::TaskSet>,
         }
@@ -1167,7 +1168,7 @@ fn generate_spawn_core(
 
                 self.__rillet_seed_view();
                 let __rillet_view = self.__rillet_view_slot_any();
-                let __rillet_gauges = self.__rillet_gauges_any();
+                let __rillet_gauges = self.__rillet_gauge_cells();
                 let __ops_cell = self.__rillet_ops.clone();
 
                 #(#event_receiver_setup)*

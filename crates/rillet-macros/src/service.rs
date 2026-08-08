@@ -57,11 +57,10 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             .expect("fields of a named-fields struct have idents");
         let attrs = parse_field_attrs(field)?;
         if attrs.gauge {
-            if attrs.get || attrs.default.is_some() {
+            if attrs.get {
                 return Err(Error::new_spanned(
                     field,
-                    "a gauge field is sampled from the handle and initialized from `Default`; \
-                     it cannot also be `get` or `default`",
+                    "a gauge field is sampled from the handle; it cannot also be `get`",
                 ));
             }
             gauges.push(GaugeField {
@@ -70,7 +69,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             });
             defaults.push(DefaultField {
                 name,
-                default_expr: None,
+                default_expr: attrs.default.flatten(),
             });
             continue;
         }
@@ -579,35 +578,25 @@ fn generate_emit_methods(struct_name: &Ident, emitted_events: &[Ident]) -> Token
     }
 }
 
-/// Generate the view publication plumbing and view handle type.
-///
-/// The seed/publish helpers exist on every service (as no-ops without a
-/// view), so the generated spawn loop can call them unconditionally.
-/// Generate the gauge sharing method and the handle's samplers.
-///
-/// `__rillet_gauges_any` exists on every service so the spawn path can
-/// call it unconditionally; without gauge fields it returns `None`.
+/// Generate the gauge cells alias, the sharing method, and the handle's
+/// samplers, emitted for every service and unit-typed without gauge
+/// fields.
 fn generate_gauge_impls(
     struct_name: &Ident,
     handle_name: &Ident,
     gauges: &[GaugeField],
 ) -> TokenStream {
-    if gauges.is_empty() {
-        return quote! {
-            impl #struct_name {
-                #[doc(hidden)]
-                pub fn __rillet_gauges_any(
-                    &self,
-                ) -> Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>> {
-                    None
-                }
-            }
-        };
-    }
-
+    let alias = format_ident!("__{}Gauges", struct_name);
     let names: Vec<&Ident> = gauges.iter().map(|gauge| &gauge.name).collect();
     let types: Vec<&Type> = gauges.iter().map(|gauge| &gauge.ty).collect();
     let cells_ty = quote! { (#(#types,)*) };
+    // An empty block, not a `()` literal, so the unit case passes the
+    // unused_unit lint.
+    let cells_body = if gauges.is_empty() {
+        quote! {}
+    } else {
+        quote! { (#(self.#names.clone(),)*) }
+    };
 
     let samplers: Vec<TokenStream> = gauges
         .iter()
@@ -619,37 +608,31 @@ fn generate_gauge_impls(
             quote! {
                 /// Returns the gauge's latest value without taking any lock.
                 pub fn #name(&self) -> <#ty as rillet::gauge::GaugeCell>::Value {
-                    rillet::gauge::GaugeCell::load(&self.__rillet_gauge_cells().#index)
+                    rillet::gauge::GaugeCell::load(&self.__rillet_gauges.#index)
                 }
             }
         })
         .collect();
 
     quote! {
+        #[doc(hidden)]
+        pub type #alias = #cells_ty;
+
         impl #struct_name {
             #[doc(hidden)]
-            pub fn __rillet_gauges_any(
-                &self,
-            ) -> Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>> {
-                Some(rillet::runtime::Arc::new((#(self.#names.clone(),)*))
-                    as rillet::runtime::Arc<dyn std::any::Any + Send + Sync>)
+            pub fn __rillet_gauge_cells(&self) -> #alias {
+                #cells_body
             }
         }
 
         impl #handle_name {
-            #[doc(hidden)]
-            fn __rillet_gauge_cells(&self) -> &#cells_ty {
-                self.__rillet_gauges
-                    .as_ref()
-                    .and_then(|cells| cells.downcast_ref::<#cells_ty>())
-                    .expect("gauge cells not shared at spawn")
-            }
-
             #(#samplers)*
         }
     }
 }
 
+/// Generate the view publication plumbing and view handle type, emitted
+/// for every service and no-op without a view.
 fn generate_view_impls(
     struct_name: &Ident,
     handle_name: &Ident,

@@ -11,6 +11,9 @@ use support::wait_for;
 struct Microphone {
     #[rillet(gauge)]
     level: Atomic<f32>,
+
+    #[rillet(gauge, default = Atomic::new(1.0))]
+    gain: Atomic<f32>,
 }
 
 #[rillet::handlers]
@@ -34,6 +37,13 @@ impl Microphone {
 fn a_gauge_starts_at_the_value_default() {
     let mic = Microphone::new().spawn();
     assert_eq!(mic.level(), 0.0);
+    mic.cancel().wait();
+}
+
+#[test]
+fn a_gauge_starts_at_its_default_expression() {
+    let mic = Microphone::new().spawn();
+    assert_eq!(mic.gain(), 1.0);
     mic.cancel().wait();
 }
 

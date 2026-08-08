@@ -12,6 +12,9 @@
 //! whose cardinality follows the view's structure. Cell equality is
 //! identity, so a stored value never republishes a view that carries the
 //! cell.
+//!
+//! The generated sampler reads the clone taken at spawn, so a gauge field
+//! must be stored into, never reassigned.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -20,7 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::view::CheapClone;
 
 /// A lock-free latest-value cell: stores are wait-free and
-/// allocation-free, loads are wait-free.
+/// allocation-free, loads are wait-free, and clones share one cell rather
+/// than copying its value.
 ///
 /// The built-in cells guarantee this. A hand-written impl carries no such
 /// check.
