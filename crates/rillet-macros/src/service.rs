@@ -44,16 +44,36 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let struct_name = &input.ident;
     let handle_name = format_ident!("{}Handle", struct_name);
 
-    // Getters, defaults, and constructor fields come from the user's
-    // declaration, so they are collected before hidden fields are injected.
+    // Getters, defaults, gauges, and constructor fields come from the
+    // user's declaration, so they are collected before hidden fields are
+    // injected.
     let mut getters: Vec<GetterField> = Vec::new();
     let mut defaults: Vec<DefaultField> = Vec::new();
+    let mut gauges: Vec<GaugeField> = Vec::new();
     for field in fields.named.iter() {
         let name = field
             .ident
             .clone()
             .expect("fields of a named-fields struct have idents");
         let attrs = parse_field_attrs(field)?;
+        if attrs.gauge {
+            if attrs.get || attrs.default.is_some() {
+                return Err(Error::new_spanned(
+                    field,
+                    "a gauge field is sampled from the handle and initialized from `Default`; \
+                     it cannot also be `get` or `default`",
+                ));
+            }
+            gauges.push(GaugeField {
+                name: name.clone(),
+                ty: field.ty.clone(),
+            });
+            defaults.push(DefaultField {
+                name,
+                default_expr: None,
+            });
+            continue;
+        }
         if attrs.get {
             getters.push(GetterField {
                 name: name.clone(),
@@ -105,7 +125,9 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         &handle_name,
         view_type.as_ref(),
         &emitted_events,
+        &gauges,
     );
+    let gauge_impls = generate_gauge_impls(struct_name, &handle_name, &gauges);
 
     let command_capacity = args.command_capacity;
     let capacity_const = quote! {
@@ -135,6 +157,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
         #shutdown_method
         #observer_probe
         #view_impls
+        #gauge_impls
         #capacity_const
     })
 }
@@ -305,16 +328,23 @@ struct DefaultField {
     default_expr: Option<Expr>,
 }
 
+struct GaugeField {
+    name: Ident,
+    ty: Type,
+}
+
 struct FieldAttrs {
     get: bool,
     /// `Some(None)` for bare `default`, `Some(Some(expr))` for `default = expr`.
     default: Option<Option<Expr>>,
+    gauge: bool,
 }
 
 fn parse_field_attrs(field: &Field) -> Result<FieldAttrs> {
     let mut attrs = FieldAttrs {
         get: false,
         default: None,
+        gauge: false,
     };
 
     for attr in &field.attrs {
@@ -334,9 +364,13 @@ fn parse_field_attrs(field: &Field) -> Result<FieldAttrs> {
                     attrs.default = Some(None);
                 }
                 Ok(())
+            } else if meta.path.is_ident("gauge") {
+                attrs.gauge = true;
+                Ok(())
             } else {
                 Err(meta.error(
-                    "unknown rillet attribute; expected `get`, `default`, or `default = <expr>`",
+                    "unknown rillet attribute; expected `get`, `gauge`, `default`, or \
+                     `default = <expr>`",
                 ))
             }
         })?;
@@ -549,11 +583,79 @@ fn generate_emit_methods(struct_name: &Ident, emitted_events: &[Ident]) -> Token
 ///
 /// The seed/publish helpers exist on every service (as no-ops without a
 /// view), so the generated spawn loop can call them unconditionally.
+/// Generate the gauge sharing method and the handle's samplers.
+///
+/// `__rillet_gauges_any` exists on every service so the spawn path can
+/// call it unconditionally; without gauge fields it returns `None`.
+fn generate_gauge_impls(
+    struct_name: &Ident,
+    handle_name: &Ident,
+    gauges: &[GaugeField],
+) -> TokenStream {
+    if gauges.is_empty() {
+        return quote! {
+            impl #struct_name {
+                #[doc(hidden)]
+                pub fn __rillet_gauges_any(
+                    &self,
+                ) -> Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>> {
+                    None
+                }
+            }
+        };
+    }
+
+    let names: Vec<&Ident> = gauges.iter().map(|gauge| &gauge.name).collect();
+    let types: Vec<&Type> = gauges.iter().map(|gauge| &gauge.ty).collect();
+    let cells_ty = quote! { (#(#types,)*) };
+
+    let samplers: Vec<TokenStream> = gauges
+        .iter()
+        .enumerate()
+        .map(|(i, gauge)| {
+            let name = &gauge.name;
+            let ty = &gauge.ty;
+            let index = syn::Index::from(i);
+            quote! {
+                /// Returns the gauge's latest value without taking any lock.
+                pub fn #name(&self) -> <#ty as rillet::gauge::GaugeCell>::Value {
+                    rillet::gauge::GaugeCell::load(&self.__rillet_gauge_cells().#index)
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        impl #struct_name {
+            #[doc(hidden)]
+            pub fn __rillet_gauges_any(
+                &self,
+            ) -> Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>> {
+                Some(rillet::runtime::Arc::new((#(self.#names.clone(),)*))
+                    as rillet::runtime::Arc<dyn std::any::Any + Send + Sync>)
+            }
+        }
+
+        impl #handle_name {
+            #[doc(hidden)]
+            fn __rillet_gauge_cells(&self) -> &#cells_ty {
+                self.__rillet_gauges
+                    .as_ref()
+                    .and_then(|cells| cells.downcast_ref::<#cells_ty>())
+                    .expect("gauge cells not shared at spawn")
+            }
+
+            #(#samplers)*
+        }
+    }
+}
+
 fn generate_view_impls(
     struct_name: &Ident,
     handle_name: &Ident,
     view_type: Option<&Type>,
     emitted_events: &[Ident],
+    gauges: &[GaugeField],
 ) -> TokenStream {
     let Some(view_ty) = view_type else {
         return quote! {
@@ -576,8 +678,8 @@ fn generate_view_impls(
 
     let view_handle_name = format_ident!("{}ViewHandle", struct_name);
 
-    // The view handle re-exposes event subscriptions, but no commands,
-    // getters, or direct methods.
+    // The view handle re-exposes event subscriptions and gauge samplers,
+    // but no commands, getters, or direct methods.
     let subscription_delegations: Vec<TokenStream> = emitted_events
         .iter()
         .map(|event| {
@@ -587,6 +689,19 @@ fn generate_view_impls(
                 /// Subscribe to this event type.
                 pub fn #method_name(&self) -> rillet::event::EventReceiver<#event> {
                     self.inner.#method_name()
+                }
+            }
+        })
+        .collect();
+    let gauge_delegations: Vec<TokenStream> = gauges
+        .iter()
+        .map(|gauge| {
+            let name = &gauge.name;
+            let ty = &gauge.ty;
+            quote! {
+                /// Returns the gauge's latest value without taking any lock.
+                pub fn #name(&self) -> <#ty as rillet::gauge::GaugeCell>::Value {
+                    self.inner.#name()
                 }
             }
         })
@@ -692,6 +807,7 @@ fn generate_view_impls(
             }
 
             #(#subscription_delegations)*
+            #(#gauge_delegations)*
         }
     }
 }

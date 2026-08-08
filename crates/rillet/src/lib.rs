@@ -17,6 +17,7 @@ mod cancellation;
 mod spawner;
 
 pub mod event;
+pub mod gauge;
 pub mod metrics;
 pub mod op;
 pub mod view;

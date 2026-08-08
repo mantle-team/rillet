@@ -198,6 +198,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
             cmd_tx: rillet::runtime::mpsc::Sender<#command_enum_name>,
             metrics: rillet::runtime::Arc<rillet::metrics::CommandMetrics<#cmd_count>>,
             __rillet_view: Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>>,
+            __rillet_gauges: Option<rillet::runtime::Arc<dyn std::any::Any + Send + Sync>>,
             __rillet_cancel_token: rillet::runtime::CancellationToken,
             __rillet_join_handles: rillet::runtime::Arc<rillet::runtime::TaskSet>,
         }
@@ -1166,6 +1167,7 @@ fn generate_spawn_core(
 
                 self.__rillet_seed_view();
                 let __rillet_view = self.__rillet_view_slot_any();
+                let __rillet_gauges = self.__rillet_gauges_any();
                 let __ops_cell = self.__rillet_ops.clone();
 
                 #(#event_receiver_setup)*
@@ -1194,6 +1196,7 @@ fn generate_spawn_core(
                         cmd_tx,
                         metrics,
                         __rillet_view,
+                        __rillet_gauges,
                         __rillet_cancel_token: cancel_token,
                         __rillet_join_handles: join_handles.clone(),
                     },
